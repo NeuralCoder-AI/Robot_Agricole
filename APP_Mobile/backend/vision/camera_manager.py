@@ -453,6 +453,8 @@ class CameraManager:
 
     def get_status(self) -> Dict[str, Any]:
         """Retourne l'état complet du gestionnaire caméra."""
+        pc = getattr(self.pipeline, "peanut_classifier", None)
+        onnx_loaded = bool(pc is not None and getattr(pc, "onnx_loaded", False))
         return {
             "connected": self.connected,
             "is_synthetic": self.is_synthetic,
@@ -465,6 +467,8 @@ class CameraManager:
             "camera_tilt_deg": self.camera_tilt_deg,
             "current_mission": self.current_mission,
             "last_error": self.last_error,
+            "onnx_loaded": onnx_loaded,
+            "model_backend": getattr(pc, "model_backend", "") if pc else "",
             "telemetry": self.get_latest_telemetry(),
         }
 

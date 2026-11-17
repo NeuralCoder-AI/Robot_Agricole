@@ -101,11 +101,13 @@ class KinematicEngine {
         this.remainingWaitSec = 0.0;
         this.resumedAfterMovingObstacle = false;
 
-        // Suivi Intelligent Fin de Ligne
+        // Suivi Intelligent Fin de Ligne & Compteur 5 frames Sol Nu
         this.lineMissingDistanceM = 0.0;
         this.lineEndDetected = false;
         this.fieldEndDetected = false;
         this.awaitingNewRowLineCheck = false;
+        this.HYBRID_END_CONSECUTIVE_FRAMES = 5;
+        this.hybridInvalidFramesCount = 0;
         this.completionMessage = "";
 
         // Moteurs [M1..M8] et vitesse
@@ -250,6 +252,7 @@ class KinematicEngine {
         this.lineEndDetected = false;
         this.fieldEndDetected = false;
         this.awaitingNewRowLineCheck = false;
+        this.hybridInvalidFramesCount = 0;
         this.completionMessage = "";
 
         this.motors = [0, 0, 0, 0, 50, 70, 0, 0];
@@ -596,26 +599,38 @@ class KinematicEngine {
         // État : ROW_FOLLOWING
         // ----------------------------------------------------------------------
         if (this.state === "ROW_FOLLOWING") {
-            if (hybridRowValid === false) {
-                this.lineEndDetected = true;
-                this.motors = [0, 0, 0, 0, -50, 0, 0, 0];
-                this.linearSpeed = 0.0;
+            if (hybridRowValid === true) {
+                this.hybridInvalidFramesCount = 0;
                 if (this.awaitingNewRowLineCheck) {
                     this.awaitingNewRowLineCheck = false;
-                    this.fieldEndDetected = true;
-                    this.state = "MISSION_COMPLETED_BY_HYBRID_VISION";
-                    this.completionMessage = "🛑 ALERTE FRONTIÈRE : Culture non-arachide détectée -> MISSION_COMPLETED_BY_HYBRID_VISION";
+                }
+            } else if (hybridRowValid === false) {
+                this.hybridInvalidFramesCount += 1;
+                if (this.hybridInvalidFramesCount >= this.HYBRID_END_CONSECUTIVE_FRAMES) {
+                    this.hybridInvalidFramesCount = 0;
+                    this.lineEndDetected = true;
+                    this.motors = [0, 0, 0, 0, -50, 0, 0, 0];
+                    this.linearSpeed = 0.0;
+                    if (this.awaitingNewRowLineCheck) {
+                        this.awaitingNewRowLineCheck = false;
+                        this.fieldEndDetected = true;
+                        this.state = "MISSION_COMPLETED_BY_HYBRID_VISION";
+                        this.completionMessage = "🛑 MISSION TERMINÉE — FIN DES LIGNES D'ARACHIDE";
+                        this.motors = [0, 0, 0, 0, 0, 0, 0, 0];
+                        return this.getTelemetry();
+                    }
+                    const hasNext = this.advanceRowCursor();
+                    if (hasNext) {
+                        this.state = "U_TURN_SHIFT";
+                        this.awaitingNewRowLineCheck = true;
+                    } else {
+                        this.state = "MISSION_COMPLETED_BY_HYBRID_VISION";
+                        this.completionMessage = "🛑 MISSION TERMINÉE — FIN DES LIGNES D'ARACHIDE";
+                        this.fieldEndDetected = true;
+                        this.motors = [0, 0, 0, 0, 0, 0, 0, 0];
+                    }
                     return this.getTelemetry();
                 }
-                const hasNext = this.advanceRowCursor();
-                if (hasNext) {
-                    this.state = "U_TURN_SHIFT";
-                    this.awaitingNewRowLineCheck = true;
-                } else {
-                    this.state = "MISSION_COMPLETED_BY_HYBRID_VISION";
-                    this.fieldEndDetected = true;
-                }
-                return this.getTelemetry();
             }
             if (this.awaitingNewRowLineCheck && lineDetected !== undefined) {
                 this.awaitingNewRowLineCheck = false;
@@ -714,6 +729,7 @@ class KinematicEngine {
                 this.x = this.targetRowX;
                 this.heading = (this.passDirection > 0) ? 0.0 : Math.PI;
                 this.lineMissingDistanceM = 0.0;
+                this.hybridInvalidFramesCount = 0;
                 this.state = "ROW_FOLLOWING";
                 this.motors = [22, 22, 22, 22, 50, 70, 0, 0];
             }

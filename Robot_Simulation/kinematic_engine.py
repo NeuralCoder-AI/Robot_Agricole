@@ -137,11 +137,13 @@ class KinematicEngine:
         self.remaining_wait_sec: float = 0.0
         self.resumed_after_moving_obstacle: bool = False
 
-        # Gestion du mode Fin de Ligne Intelligente (SMART_LINE_END)
+        # Gestion du mode Fin de Ligne Intelligente (SMART_LINE_END & Binaire Arachide)
         self.line_missing_distance_m: float = 0.0
         self.line_end_detected: bool = False
         self.field_end_detected: bool = False
         self.awaiting_new_row_line_check: bool = False
+        self.HYBRID_END_CONSECUTIVE_FRAMES: int = 5
+        self.hybrid_invalid_frames_count: int = 0
         self.completion_message: str = ""
 
         # Moteurs [M1..M8]
@@ -302,6 +304,7 @@ class KinematicEngine:
         self.line_end_detected = False
         self.field_end_detected = False
         self.awaiting_new_row_line_check = False
+        self.hybrid_invalid_frames_count = 0
         self.completion_message = ""
 
         # Outils prêts : dents descendues (M5=50), fraise en marche (M6=70)
@@ -729,33 +732,37 @@ class KinematicEngine:
         # État : ROW_FOLLOWING
         # ----------------------------------------------------------------------
         if self.state == "ROW_FOLLOWING":
-            # Priorité Absolue du Tandem Hybride (OpenCV + IA Arachide) sur Longueur/Largeur manuelles :
-            # 1) À l'inspection de la ligne suivante post demi-tour : si non-arachide / invalide -> arrêt définitif !
+            # Priorité Absolue Binaire (Arachide vs Sol Nu) :
+            # 5 frames consécutives avec hybrid_row_valid == False -> STOP, coupe M6/M8, lève M5 !
             effective_line_ok = line_detected
-            if hybrid_row_valid is False:
-                effective_line_ok = False
+            if hybrid_row_valid is True:
+                self.hybrid_invalid_frames_count = 0
                 if self.awaiting_new_row_line_check:
                     self.awaiting_new_row_line_check = False
-                    self.field_end_detected = True
-                    self.line_end_detected = True
-                    self.state = "MISSION_COMPLETED_BY_HYBRID_VISION"
-                    self.completion_message = "🛑 ALERTE FRONTIÈRE : Fin du champ d'arachide certifiée — MISSION_COMPLETED_BY_HYBRID_VISION"
-                    self.motors = [0] * 8
-                    self.linear_speed = 0.0
-                    return self.get_telemetry()
-                else:
-                    # Fin des plants d'arachide ou culture étrangère détectée en bout de ligne : demi-tour immédiat
-                    # même si la longueur saisie par l'agriculteur n'est pas atteinte !
+            elif hybrid_row_valid is False:
+                self.hybrid_invalid_frames_count += 1
+                if self.hybrid_invalid_frames_count >= self.HYBRID_END_CONSECUTIVE_FRAMES:
+                    self.hybrid_invalid_frames_count = 0
                     self.line_end_detected = True
                     self.motors = [0, 0, 0, 0, -50, 0, 0, 0]
                     self.linear_speed = 0.0
+                    if self.awaiting_new_row_line_check:
+                        self.awaiting_new_row_line_check = False
+                        self.field_end_detected = True
+                        self.state = "MISSION_COMPLETED_BY_HYBRID_VISION"
+                        self.completion_message = "🛑 MISSION TERMINÉE — FIN DES LIGNES D'ARACHIDE"
+                        self.motors = [0] * 8
+                        return self.get_telemetry()
+                    # Fin de ligne d'arachide détectée avant field_length -> demi-tour si autre ligne, sinon fin
                     has_next = self.advance_row_cursor()
                     if has_next:
                         self.state = "U_TURN_SHIFT"
                         self.awaiting_new_row_line_check = True
                     else:
+                        self.field_end_detected = True
                         self.state = "MISSION_COMPLETED_BY_HYBRID_VISION"
-                        self.completion_message = "🛑 ALERTE FRONTIÈRE : Dernière ligne atteinte — MISSION_COMPLETED_BY_HYBRID_VISION"
+                        self.completion_message = "🛑 MISSION TERMINÉE — FIN DES LIGNES D'ARACHIDE"
+                        self.motors = [0] * 8
                     return self.get_telemetry()
 
             # Si on vient de finir un demi-tour en mode SMART_LINE_END, vérifier si une nouvelle ligne existe
@@ -850,16 +857,13 @@ class KinematicEngine:
                 self.x = self.target_row_x
                 self.heading = 0.0 if self.pass_direction > 0 else math.pi
                 self.line_missing_distance_m = 0.0
-                if self.awaiting_new_row_line_check and (line_detected is False or hybrid_row_valid is False):
+                self.hybrid_invalid_frames_count = 0
+                if self.awaiting_new_row_line_check and line_detected is False:
                     self.awaiting_new_row_line_check = False
                     self.field_end_detected = True
                     self.line_end_detected = True
-                    if hybrid_row_valid is False:
-                        self.state = "MISSION_COMPLETED_BY_HYBRID_VISION"
-                        self.completion_message = "🛑 ALERTE FRONTIÈRE : Fin du champ d'arachide certifiée — MISSION_COMPLETED_BY_HYBRID_VISION"
-                    else:
-                        self.state = "MISSION_COMPLETE"
-                        self.completion_message = "✅ Fin de parcelle détectée automatiquement — Mission terminée"
+                    self.state = "MISSION_COMPLETE"
+                    self.completion_message = "✅ Fin de parcelle détectée automatiquement — Mission terminée"
                     self.motors = [0] * 8
                     self.linear_speed = 0.0
                 else:

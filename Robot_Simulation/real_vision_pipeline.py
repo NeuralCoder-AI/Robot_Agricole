@@ -62,6 +62,8 @@ class RealVisionPipeline:
         self._ema_initialized: bool = False
         self._clahe = cv2.createCLAHE(clipLimit=2.2, tileGridSize=(8, 8))
         self.peanut_classifier = PeanutPlantClassifier(confidence_threshold=0.65)
+        self.consecutive_non_peanut_frames: int = 0
+        self.end_of_row_consecutive_frames: int = 5
 
     def set_optical_config(
         self,
@@ -301,9 +303,17 @@ class RealVisionPipeline:
         elif mode == "OBSTACLE_AVOIDANCE":
             self._process_mission_obstacle_only(vis, w, h, telemetry)
 
-        # 4-bis. Validation Hybride OpenCV + IA Pré-entraînée Arachis hypogaea (pour cultures levées)
+        # 4-bis. Validation Hybride Binaire OpenCV + MobileNetV3 ONNX (Arachide vs Sol Nu)
+        telemetry["onnx_loaded"] = bool(getattr(self.peanut_classifier, "onnx_loaded", False))
+        telemetry["model_backend"] = getattr(self.peanut_classifier, "model_backend", "")
         if mode in ("WEEDING", "RESEEDING"):
             hybrid = self.validate_peanut_row_hybrid(rectified, roi_box=None, mission_type=mode)
+            if hybrid["is_valid_peanut_row"]:
+                self.consecutive_non_peanut_frames = 0
+            else:
+                self.consecutive_non_peanut_frames += 1
+
+            confirmed_end = bool(self.consecutive_non_peanut_frames >= self.end_of_row_consecutive_frames)
             telemetry["hybrid_validation"] = hybrid
             telemetry["is_valid_peanut_row"] = hybrid["is_valid_peanut_row"]
             telemetry["opencv_line_aligned"] = hybrid["opencv_line_aligned"]
@@ -312,13 +322,25 @@ class RealVisionPipeline:
             telemetry["detected_species_label"] = hybrid["detected_species_label"]
             telemetry["hybrid_hud_badge"] = hybrid["hud_badge"]
             telemetry["hybrid_boundary_alert"] = hybrid["hud_alert"]
-            if hybrid["hud_alert"] and not telemetry.get("obstacle_stop", False):
-                telemetry["hybrid_line_end_detected"] = True
+            telemetry["consecutive_non_peanut_frames"] = self.consecutive_non_peanut_frames
+            telemetry["hybrid_line_end_confirmed"] = confirmed_end
+            telemetry["hybrid_line_end_detected"] = confirmed_end
+
+            if confirmed_end and not telemetry.get("obstacle_stop", False):
+                telemetry["recommended_drive"] = {"a": 0, "d": 0, "ms": 250}
+                telemetry["recommended_tools"] = {"tines_depth": 0.0, "cutter_m6": 0, "seeder_m8": 0}
+                telemetry["cutter_m6_active"] = False
+                telemetry["seeder_m8_active"] = False
+                telemetry["tines_m5_lowered"] = False
                 telemetry["hud_message"] = hybrid["hud_badge"]
         else:
+            self.consecutive_non_peanut_frames = 0
             telemetry.setdefault("is_valid_peanut_row", True)
             telemetry.setdefault("hybrid_hud_badge", "🌱 Mode Semis Initial (Suivi Sillon Central)")
             telemetry.setdefault("hybrid_boundary_alert", False)
+            telemetry["consecutive_non_peanut_frames"] = 0
+            telemetry["hybrid_line_end_confirmed"] = False
+            telemetry["hybrid_line_end_detected"] = False
 
         # 5. Synthèse de l'ordre matériel [VISION IA -> ORDRE ROBOT]
         rec = telemetry.get("recommended_drive") or {"a": 25, "d": 0, "ms": 250}
@@ -327,6 +349,8 @@ class RealVisionPipeline:
             telemetry["robot_order_str"] = (
                 f"STOP OBSTACLE ({telemetry.get('obstacle_dist_m', 0):.2f}m -> CONTOURNER {side_lbl}) | Dents M5: RELEVÉES | Fraise M6: OFF"
             )
+        elif telemetry.get("hybrid_line_end_confirmed"):
+            telemetry["robot_order_str"] = "STOP (FIN DE LIGNE ARACHIDE) | Fraise M6: OFF | Semoir M8: OFF | Dents M5: RELEVÉES"
         elif mode == "SEEDING":
             telemetry["robot_order_str"] = f"DRIVE:{rec['a']},{rec['d']}:{rec.get('ms', 250)} | Semoir M8: ACTIF | Dents M5: RELEVÉES | Fraise M6: OFF"
         elif mode == "RESEEDING":
@@ -858,10 +882,10 @@ class RealVisionPipeline:
         roi_box: Optional[Tuple[int, int, int, int]] = None,
         mission_type: str = "WEEDING",
     ) -> Dict[str, Any]:
-        """Double Validation Hybride : OpenCV (Géométrie) + Modèle Pré-entraîné (Botanique Arachis hypogaea).
+        """Double Validation Binaire Hybride : OpenCV (Alignement ExG) + MobileNetV3-Small ONNX (Arachide vs Sol Nu).
         Une ligne n'est validée (`is_valid_peanut_row == True`) QUE SI :
             `opencv_line_aligned == True` ET `classifier.is_peanut == True` (`peanut_confidence >= 0.65`).
-        Protège le robot contre l'entrée dans un champ voisin semé en lignes droites (mil, sorgho, niébé, maïs).
+        Dès que la ligne d'arachide laisse place au sol nu (`is_valid_peanut_row == False`), le robot s'arrête.
         """
         if frame is None or frame.size == 0:
             return {
@@ -869,9 +893,10 @@ class RealVisionPipeline:
                 "opencv_line_aligned": False,
                 "is_peanut": False,
                 "peanut_confidence": 0.0,
-                "detected_species_label": "Sol Nu",
+                "detected_species_label": "Sol Nu — Fin de ligne d'arachide",
                 "crops_count": 0,
-                "hud_badge": "🛑 ALERTE FRONTIÈRE : Culture non-arachide détectée (Mil/Brousse) -> Demi-tour / Arrêt",
+                "onnx_loaded": bool(getattr(self.peanut_classifier, "onnx_loaded", False)),
+                "hud_badge": "🛑 FIN DE LIGNE D'ARACHIDE : Sol nu détecté -> Arrêt / Demi-tour",
                 "hud_alert": True,
                 "boundary_action": "UTURN_LINE_END",
             }
@@ -970,23 +995,24 @@ class RealVisionPipeline:
             if len(band_crops) >= len(crops):
                 crops = band_crops[:3]
 
-        # Étape 2 : Modèle Pré-entraîné Arachide (Validation Biologique)
+        # Étape 2 : Modèle Binaire MobileNetV3-Small ONNX / ExG (Arachide vs Sol Nu)
         clf_res = self.peanut_classifier.verify_peanut_crop(crops)
         is_peanut = bool(clf_res.get("is_peanut", False))
         peanut_conf = float(clf_res.get("peanut_confidence", 0.0))
-        species_label = str(clf_res.get("detected_species_label", "Sol Nu"))
+        species_label = str(clf_res.get("detected_species_label", "Sol Nu — Fin de ligne d'arachide"))
 
-        # Étape 3 : Décision Combinée (Double Validation Géométrique + Botanique)
+        # Étape 3 : Décision Binaire Combinée (Alignement OpenCV + Arachide confirmée)
         conf_thresh = getattr(self.peanut_classifier, "confidence_threshold", 0.65)
         is_valid_peanut_row = bool(opencv_line_aligned and is_peanut and peanut_conf >= conf_thresh)
 
         conf_pct = int(round(peanut_conf * 100))
         if is_valid_peanut_row:
-            hud_badge = f"🥜 IA Botanique : Arachis hypogaea confirmé ({conf_pct}%) + 📐 OpenCV : Rang aligné"
+            hud_badge = f"🥜 IA Botanique : Arachide détectée ({conf_pct}%) + 📐 OpenCV : Rang aligné"
             hud_alert = False
             boundary_action = "CONTINUE"
         else:
-            hud_badge = f"🛑 ALERTE FRONTIÈRE : Culture non-arachide détectée (Mil/Brousse) -> Demi-tour / Arrêt"
+            species_label = "Sol Nu — Fin de ligne d'arachide"
+            hud_badge = "🛑 FIN DE LIGNE D'ARACHIDE : Sol nu détecté -> Arrêt / Demi-tour"
             hud_alert = True
             boundary_action = "UTURN_LINE_END"
 
@@ -1000,6 +1026,7 @@ class RealVisionPipeline:
             "line_angle_deg": round(line_angle_deg, 2),
             "mission_type": mission_type,
             "model_backend": clf_res.get("model_backend", self.peanut_classifier.model_backend),
+            "onnx_loaded": bool(getattr(self.peanut_classifier, "onnx_loaded", False)),
             "hud_badge": hud_badge,
             "hud_alert": hud_alert,
             "boundary_action": boundary_action,
@@ -1039,16 +1066,16 @@ class RealVisionPipeline:
             1,
         )
 
-        # Badge Hybride Botanique (Arachis hypogaea + OpenCV)
+        # Badge Hybride Binaire (Arachide vs Sol Nu + OpenCV)
         hybrid_badge = telemetry.get("hybrid_hud_badge")
         if hybrid_badge and mode_str in ("WEEDING", "RESEEDING"):
             is_alert = bool(telemetry.get("hybrid_boundary_alert", False))
             conf_pct = int(round(float(telemetry.get("peanut_confidence", 0.0)) * 100))
             if not is_alert:
-                ascii_badge = f"IA Botanique : Arachis hypogaea confirme ({conf_pct}%) + OpenCV : Rang aligne"
+                ascii_badge = f"IA Botanique : Arachide detectee ({conf_pct}%) + OpenCV : Rang aligne"
                 b_bg, b_fg = (12, 85, 35), (120, 255, 150)
             else:
-                ascii_badge = "ALERTE FRONTIERE : Culture non-arachide detectee (Mil/Brousse) -> Demi-tour / Arret"
+                ascii_badge = "FIN DE LIGNE ARACHIDE : Sol nu detecte -> Arret / Demi-tour"
                 b_bg, b_fg = (20, 20, 145), (150, 175, 255)
             cv2.rectangle(vis, (12, h - 42), (w - 12, h - 14), b_bg, -1)
             cv2.putText(vis, ascii_badge, (20, h - 22), cv2.FONT_HERSHEY_SIMPLEX, 0.45, b_fg, 2)

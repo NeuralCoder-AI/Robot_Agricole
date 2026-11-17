@@ -1517,6 +1517,37 @@ class RobotController:
     def _wrap_angle(a: float) -> float:
         return math.atan2(math.sin(a), math.cos(a))
 
+    def _verify_peanut_row_present_after_turn(self, required_invalid_frames: int = 5) -> bool:
+        """Après un demi-tour en mode REAL_ZERO_SIM, vérifie s'il y a encore de l'arachide sur la ligne suivante.
+        Si le classificateur retourne Sol Nu sur 5 frames consécutives, arrête définitivement la mission.
+        """
+        if self._has_live_pose() or self.execution_mode != ExecutionMode.REAL_ZERO_SIM.value:
+            return True
+        try:
+            from backend.vision.camera_manager import camera_manager as _cm
+        except Exception:
+            return True
+
+        invalid_count = 0
+        for _ in range(required_invalid_frames):
+            cam_telem = _cm.get_latest_telemetry()
+            if cam_telem.get("is_valid_peanut_row") is False or cam_telem.get("hybrid_boundary_alert"):
+                invalid_count += 1
+            else:
+                return True
+            time.sleep(0.04)
+
+        if invalid_count >= required_invalid_frames:
+            self.stop()
+            self.stop_motor(6)
+            self.stop_motor(8)
+            self.state = "MISSION_COMPLETED_BY_HYBRID_VISION"
+            msg = "🛑 MISSION TERMINÉE — FIN DES LIGNES D'ARACHIDE"
+            logger.info("[HYBRID VISION] %s", msg)
+            self._notify_mission_progress(100, msg)
+            return False
+        return True
+
     def _follow_corridor(
         self,
         corridor_center_x: float,
@@ -1542,6 +1573,7 @@ class RobotController:
                     cam_mgr = None
 
             cutter_running_real = weeding
+            consec_invalid_peanut = 0
             for step_idx in range(fallback_steps):
                 if not self._check_pause_or_stop():
                     return False
@@ -1595,19 +1627,27 @@ class RobotController:
                             if weeding:
                                 self.motor(6, 70)
 
-                    # Arrêt immédiat fin de rang / frontière non-arachide (Validation Hybride OpenCV + IA Botanique)
-                    if (weeding or reseeding) and (
-                        cam_telem.get("hybrid_boundary_alert") or cam_telem.get("hybrid_line_end_detected")
-                    ):
-                        self.stop()
-                        self.stop_motor(6)
-                        self.stop_motor(8)
-                        alert_msg = cam_telem.get("hybrid_hud_badge") or (
-                            "🛑 ALERTE FRONTIÈRE : Culture non-arachide détectée (Mil/Brousse) -> Demi-tour / Arrêt"
-                        )
-                        logger.warning("[HYBRID VISION] %s", alert_msg)
-                        self._notify_mission_progress(pct_end, alert_msg)
-                        break
+                    # Arrêt immédiat fin de ligne d'arachide (Sol Nu sur 5 frames consécutives)
+                    if weeding or reseeding:
+                        is_row_ok = cam_telem.get("is_valid_peanut_row", True)
+                        if is_row_ok is False or cam_telem.get("hybrid_boundary_alert"):
+                            consec_invalid_peanut += 1
+                        else:
+                            consec_invalid_peanut = 0
+
+                        if cam_telem.get("hybrid_line_end_confirmed") or consec_invalid_peanut >= 5:
+                            self.stop()
+                            self.stop_motor(6)
+                            self.stop_motor(8)
+                            if weeding or self.seeding_use_tines:
+                                self.pulse(5, -50, 4000)
+                                self.wait_for_done([5], timeout=5.0)
+                            alert_msg = cam_telem.get("hybrid_hud_badge") or (
+                                "🛑 FIN DE LIGNE D'ARACHIDE : Sol nu détecté (5 frames) -> Arrêt / Demi-tour"
+                            )
+                            logger.warning("[HYBRID VISION] %s", alert_msg)
+                            self._notify_mission_progress(pct_end, alert_msg)
+                            break
 
                     if weeding and int(cam_telem.get("weeds_detected_count", 0)) > 0:
                         if not cutter_running_real:
@@ -2812,6 +2852,8 @@ class RobotController:
                 ok, heading = self._headland_turn(heading, corridor_x)
                 if not ok:
                     completed = False
+                elif not self._verify_peanut_row_present_after_turn():
+                    break
             if not completed:
                 break
 
@@ -2902,6 +2944,8 @@ class RobotController:
                 ok, heading = self._headland_turn(heading, corridor_x)
                 if not ok:
                     completed = False
+                elif not self._verify_peanut_row_present_after_turn():
+                    break
             if not completed:
                 break
 
@@ -3183,6 +3227,8 @@ class RobotController:
                 self.current_target_heading_rad = heading
                 if not ok:
                     completed = False
+                elif not self._verify_peanut_row_present_after_turn():
+                    break
             if not completed:
                 break
 
