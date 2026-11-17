@@ -1,0 +1,40 @@
+/* static/css/main.css — Reset Global, Grille Principale & Contrôle Strict de Hauteur */
+
+html, body {
+    height: 100vh;
+    max-height: 100vh;
+    width: 100vw;
+    max-width: 100vw;
+    overflow: hidden;
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+*, *::before, *::after {
+    box-sizing: border-box;
+}
+
+/* Grille CSS Principale (Zéro Panneau Coupé à Droite) */
+.main-workspace, .container {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) 380px !important; /* Scène 3D à gauche + Colonne droite 380px fixe */
+    gap: 12px !important;
+    width: 100vw !important;
+    max-width: 100vw !important;
+    height: calc(100vh - 56px) !important;
+    max-height: calc(100vh - 56px) !important;
+    padding: 10px !important;
+    box-sizing: border-box !important;
+    overflow: hidden !important;
+}
+
+/* Suppression définitive des scrollbars intempestives */
+.sidebar-dock-card::-webkit-scrollbar,
+.mission-container-panel::-webkit-scrollbar,
+.mission-prep-view::-webkit-scrollbar,
+.mission-active-view::-webkit-scrollbar {
+    width: 0px;
+    height: 0px;
+    display: none;
+}

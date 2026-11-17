@@ -1,0 +1,32 @@
+{
+  "expo": {
+    "name": "Robot Agricole ESP32-S3",
+    "slug": "robot-agricole-esp32s3",
+    "version": "2.3.0",
+    "orientation": "landscape",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#060a10",
+    "primaryColor": "#00e676",
+    "splash": {
+      "backgroundColor": "#060a10",
+      "resizeMode": "contain"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "requireFullScreen": true,
+      "bundleIdentifier": "com.robotagricole.esp32s3"
+    },
+    "android": {
+      "package": "com.robotagricole.esp32s3",
+      "adaptiveIcon": {
+        "backgroundColor": "#060a10"
+      }
+    },
+    "web": {
+      "bundler": "metro"
+    }
+  }
+}

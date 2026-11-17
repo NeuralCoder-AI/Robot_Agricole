@@ -1,0 +1,17 @@
+[project]
+name = "robot_pc"
+version = "1.0.0"
+description = "Pilotage Windows du robot agricole ESP32-S3 (firmware v2) : liaison UART, séquences, GPS-RTK, vision"
+requires-python = ">=3.10"
+dependencies = ["pyserial>=3.5"]
+
+[project.optional-dependencies]
+vision = ["ultralytics>=8.1", "opencv-python>=4.8"]
+dev = ["pytest>=7"]
+
+[project.scripts]
+robot-pc = "robot_pc.cli:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"

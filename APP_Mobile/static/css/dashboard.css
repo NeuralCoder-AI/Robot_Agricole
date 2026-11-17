@@ -1,0 +1,679 @@
+/* static/css/dashboard.css — Layout Propre, Zéro Scroll H/V, Header Épuré */
+
+/* ======================================================================
+   1. HEADER SUPÉRIEUR ÉPURÉ (Zéro chevauchement, 3 zones claires)
+   ====================================================================== */
+header {
+    height: 52px;
+    padding: 0 16px;
+    background: rgba(11, 18, 32, 0.92);
+    backdrop-filter: blur(16px);
+    border-bottom: 1px solid rgba(148, 163, 184, 0.16);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    z-index: 100;
+    flex-shrink: 0;
+    box-sizing: border-box;
+}
+
+.hdr-left-group {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+}
+
+.hdr-nav-btn {
+    background: rgba(14, 165, 233, 0.15);
+    border: 1px solid #0284c7;
+    color: #38bdf8;
+    padding: 6px 12px;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    transition: all 0.2s;
+    white-space: nowrap;
+}
+
+.hdr-nav-btn:hover {
+    background: #0284c7;
+    color: #ffffff;
+    box-shadow: 0 0 12px rgba(2, 132, 199, 0.4);
+}
+
+.hdr-active-title {
+    font-size: 15px;
+    font-weight: 800;
+    color: #f8fafc;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    letter-spacing: -0.2px;
+}
+
+/* Zone Centrale : Badge du Mode Actif */
+.hdr-center-group {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.hdr-mode-badge {
+    padding: 5px 12px;
+    border-radius: 20px;
+    font-size: 11.5px;
+    font-weight: 700;
+    letter-spacing: 0.2px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+    transition: all 0.25s ease;
+}
+
+.hdr-mode-badge.simulation {
+    background: rgba(14, 165, 233, 0.15);
+    border: 1px solid rgba(56, 189, 248, 0.4);
+    color: #38bdf8;
+}
+
+.hdr-mode-badge.coupled-connected {
+    background: rgba(16, 185, 129, 0.15);
+    border: 1px solid rgba(16, 185, 129, 0.45);
+    color: #34d399;
+    box-shadow: 0 0 10px rgba(16, 185, 129, 0.2);
+}
+
+.hdr-mode-badge.coupled-waiting {
+    background: rgba(244, 63, 94, 0.15);
+    border: 1px solid rgba(244, 63, 94, 0.45);
+    color: #fb7185;
+}
+
+/* Zone Droite : Sécurité & Menu Paramètres */
+.hdr-right-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+}
+
+.btn-estop-compact {
+    background: linear-gradient(135deg, #b91c1c, #dc2626);
+    color: #fff;
+    border: 1px solid #ef4444;
+    padding: 6px 12px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 800;
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+}
+
+.btn-estop-compact:hover {
+    background: #ef4444;
+    box-shadow: 0 0 14px rgba(239, 68, 68, 0.5);
+}
+
+.btn-arm-compact {
+    background: linear-gradient(135deg, #059669, #10b981);
+    color: #fff;
+    border: 1px solid #34d399;
+    padding: 6px 12px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 800;
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+}
+
+.btn-arm-compact:hover {
+    background: #10b981;
+    box-shadow: 0 0 14px rgba(16, 185, 129, 0.5);
+}
+
+.hdr-dropdown-container {
+    position: relative;
+    display: inline-block;
+}
+
+.hdr-icon-btn {
+    background: rgba(30, 41, 59, 0.8);
+    border: 1px solid rgba(148, 163, 184, 0.25);
+    color: #f1f5f9;
+    width: 34px;
+    height: 34px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.hdr-icon-btn:hover {
+    background: #334155;
+    border-color: #00e5ff;
+}
+
+.hdr-dropdown-menu {
+    position: absolute;
+    right: 0;
+    top: 42px;
+    background: #0f172a;
+    border: 1px solid #334155;
+    border-radius: 10px;
+    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.6);
+    min-width: 230px;
+    z-index: 1000;
+    overflow: hidden;
+    padding: 4px 0;
+    animation: fadeInMenu 0.15s ease-out;
+}
+
+@keyframes fadeInMenu {
+    from { opacity: 0; transform: translateY(-6px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.hdr-dropdown-menu button, .hdr-dropdown-menu a {
+    display: block;
+    width: 100%;
+    padding: 9px 14px;
+    text-align: left;
+    background: none;
+    border: none;
+    color: #cbd5e1;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    box-sizing: border-box;
+    transition: all 0.15s;
+}
+
+.hdr-dropdown-menu button:hover, .hdr-dropdown-menu a:hover {
+    background: #1e293b;
+    color: #00e5ff;
+}
+
+/* ======================================================================
+   2. DOCK LATÉRAL DROIT : ZÉRO SCROLL (H et V) & DIMENSIONS STRICTES (380px)
+   ====================================================================== */
+.main-workspace, .container {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) 380px !important;
+    gap: 12px !important;
+    width: 100vw !important;
+    max-width: 100vw !important;
+    height: calc(100vh - 56px) !important;
+    max-height: calc(100vh - 56px) !important;
+    padding: 10px !important;
+    box-sizing: border-box !important;
+    overflow: hidden !important;
+}
+
+.sidebar-dock-card {
+    height: 100% !important;
+    max-height: 100% !important;
+    overflow-x: hidden !important;
+    overflow-y: hidden !important;
+    box-sizing: border-box !important;
+    padding: 10px !important;
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 10px !important;
+    width: 380px !important;
+    max-width: 380px !important;
+    flex-shrink: 0 !important;
+}
+
+/* Zone Haute : Contrôles de la mission active */
+.mission-top-zone {
+    flex: 1 1 auto;
+    max-height: calc(100% - 235px);
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    box-sizing: border-box;
+    overflow-y: auto;
+    overflow-x: hidden;
+}
+
+/* Zone Basse Permanente : Console des Commandes (Simu & ESP32) */
+.console-bottom-zone {
+    flex: 0 0 220px;
+    height: 220px;
+    min-height: 220px;
+    max-height: 220px;
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    background: rgba(5, 11, 20, 0.92);
+    border: 1px solid rgba(56, 189, 248, 0.35);
+    border-radius: 10px;
+    padding: 8px 10px;
+    box-sizing: border-box;
+    overflow: hidden;
+}
+
+/* Sous-panneaux de mission */
+.mission-container-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    height: 100%;
+    overflow: hidden;
+    box-sizing: border-box;
+}
+
+/* ======================================================================
+   3. ÉTAT A : VUE PRÉPARATION (Mise en Position & Lancement)
+   ====================================================================== */
+.mission-prep-view {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    box-sizing: border-box;
+    width: 100%;
+}
+
+.prep-card-compact {
+    background: rgba(11, 20, 36, 0.75);
+    border: 1px solid rgba(56, 189, 248, 0.22);
+    border-radius: 10px;
+    padding: 8px 10px;
+    box-sizing: border-box;
+    width: 100%;
+}
+
+.prep-card-compact h5 {
+    font-size: 11px;
+    font-weight: 800;
+    color: #38bdf8;
+    margin-bottom: 6px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+/* Coordonnées sur une seule ligne compacte */
+.prep-coords-strip {
+    background: #070d18;
+    border: 1px solid rgba(148, 163, 184, 0.16);
+    border-radius: 6px;
+    padding: 4px 8px;
+    font-family: Consolas, monospace;
+    font-size: 11px;
+    color: #34d399;
+    text-align: center;
+    margin-bottom: 6px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* Mini D-Pad Compact & Curseur Vitesse Intégré */
+.prep-dpad-compact-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 34px);
+    grid-template-rows: repeat(3, 28px);
+    gap: 3px;
+    justify-content: center;
+    margin: 4px auto 6px;
+}
+
+.prep-dpad-btn {
+    background: #1e293b;
+    border: 1px solid #334155;
+    color: #f8fafc;
+    border-radius: 5px;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    user-select: none;
+    transition: all 0.12s;
+}
+
+.prep-dpad-btn:active, .prep-dpad-btn:hover {
+    background: #0284c7;
+    color: #ffffff;
+    border-color: #38bdf8;
+}
+
+.prep-dpad-btn.stop {
+    background: #7f1d1d;
+    border-color: #b91c1c;
+    color: #fca5a5;
+}
+
+.prep-dpad-btn.stop:hover, .prep-dpad-btn.stop:active {
+    background: #dc2626;
+    color: #ffffff;
+}
+
+.prep-speed-slider-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 4px;
+    margin-top: 2px;
+}
+
+.prep-speed-slider-row label {
+    font-size: 10px;
+    color: #94a3b8;
+    white-space: nowrap;
+}
+
+.prep-speed-slider-row input[type="range"] {
+    flex: 1;
+    height: 4px;
+    accent-color: #00e5ff;
+}
+
+.prep-speed-slider-row span {
+    font-size: 10.5px;
+    font-family: monospace;
+    font-weight: 700;
+    color: #00e5ff;
+    width: 28px;
+    text-align: right;
+}
+
+/* Grilles 1fr 1fr sans débordement horizontal */
+.prep-inputs-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    box-sizing: border-box;
+    width: 100%;
+}
+
+.prep-inputs-grid input {
+    width: 100%;
+    box-sizing: border-box;
+    background: #08101e;
+    border: 1px solid #263859;
+    border-radius: 6px;
+    color: #f8fafc;
+    padding: 5px 8px;
+    font-size: 11.5px;
+}
+
+.prep-dir-selector-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    margin-top: 6px;
+    box-sizing: border-box;
+    width: 100%;
+}
+
+.prep-dir-btn {
+    background: #08101e;
+    border: 1px solid #334155;
+    color: #94a3b8;
+    padding: 7px 4px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 700;
+    cursor: pointer;
+    text-align: center;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    box-sizing: border-box;
+    transition: all 0.15s;
+}
+
+.prep-dir-btn.active {
+    background: rgba(14, 165, 233, 0.25);
+    border-color: #00e5ff;
+    color: #00e5ff;
+    box-shadow: 0 0 10px rgba(0, 229, 255, 0.3);
+}
+
+.btn-launch-mission-cta {
+    width: 100%;
+    background: linear-gradient(135deg, #059669, #10b981);
+    border: none;
+    color: #ffffff;
+    padding: 10px 14px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 800;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    margin-top: 4px;
+    box-sizing: border-box;
+    transition: all 0.2s;
+}
+
+.btn-launch-mission-cta:hover {
+    box-shadow: 0 0 16px rgba(16, 185, 129, 0.45);
+    transform: translateY(-1px);
+}
+
+/* ======================================================================
+   4. ÉTAT B : VUE MISSION ACTIVE (Supervision & Télémétrie en Cours)
+   ====================================================================== */
+.mission-active-view {
+    display: none;
+    flex-direction: column;
+    gap: 8px;
+    box-sizing: border-box;
+    width: 100%;
+}
+
+.active-mission-banner {
+    background: rgba(16, 185, 129, 0.14);
+    border: 1px solid rgba(16, 185, 129, 0.4);
+    border-radius: 8px;
+    padding: 8px 10px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    box-sizing: border-box;
+    width: 100%;
+}
+
+.active-mission-banner-title {
+    font-size: 11.5px;
+    font-weight: 800;
+    color: #34d399;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.active-mission-banner-pass {
+    font-size: 10px;
+    color: #cbd5e1;
+    font-family: Consolas, monospace;
+    white-space: nowrap;
+}
+
+/* Grille Télémétrie 2x2 propre et aérée */
+.active-telemetry-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    box-sizing: border-box;
+    width: 100%;
+}
+
+.telemetry-cell {
+    background: #09101d;
+    border: 1px solid rgba(148, 163, 184, 0.15);
+    border-radius: 8px;
+    padding: 8px 10px;
+    box-sizing: border-box;
+}
+
+.telemetry-cell-lbl {
+    font-size: 9.5px;
+    color: #94a3b8;
+    margin-bottom: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.telemetry-cell-val {
+    font-size: 17px;
+    font-weight: 800;
+    color: #f8fafc;
+    font-family: Consolas, monospace;
+}
+
+/* Grille d'actions outils 1fr 1fr sans débordement */
+.active-tools-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    box-sizing: border-box;
+    width: 100%;
+}
+
+.active-tool-btn {
+    background: rgba(30, 41, 59, 0.7);
+    border: 1px solid rgba(148, 163, 184, 0.2);
+    color: #f1f5f9;
+    padding: 8px 6px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 700;
+    cursor: pointer;
+    text-align: center;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    box-sizing: border-box;
+    width: 100%;
+    transition: all 0.15s;
+}
+
+.active-tool-btn:hover {
+    background: #334155;
+    border-color: #00e5ff;
+}
+
+.btn-abort-mission-cta {
+    width: 100%;
+    background: rgba(244, 63, 94, 0.15);
+    border: 1px solid rgba(244, 63, 94, 0.5);
+    color: #fda4af;
+    padding: 9px 12px;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 800;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    margin-top: 4px;
+    box-sizing: border-box;
+    transition: all 0.2s;
+}
+
+.btn-abort-mission-cta:hover {
+    background: #dc2626;
+    color: #ffffff;
+    box-shadow: 0 0 14px rgba(220, 38, 38, 0.4);
+}
+
+/* ==========================================================================
+   MODULE MATÉRIEL & COCKPIT ZÉRO SIMULATION (ESP32 + CAMÉRA 170°)
+   ========================================================================== */
+.status-led {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+    vertical-align: middle;
+    margin-left: 4px;
+    transition: all 0.25s ease;
+}
+.status-led.led-red {
+    background-color: #ef4444;
+    box-shadow: 0 0 6px #ef4444;
+}
+.status-led.led-green {
+    background-color: #10b981;
+    box-shadow: 0 0 8px #10b981;
+}
+.hdr-hw-btn {
+    background: rgba(15, 23, 42, 0.7);
+    border: 1px solid #334155;
+    color: #e2e8f0;
+    font-size: 11.5px;
+    font-weight: 700;
+    padding: 5px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    transition: all 0.2s;
+}
+.hdr-hw-btn:hover {
+    background: #1e293b;
+    border-color: #38bdf8;
+}
+.exec-mode-pill-btn {
+    background: transparent;
+    border: none;
+    color: #94a3b8;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 4px 10px;
+    border-radius: 16px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+.exec-mode-pill-btn.active-sim {
+    background: rgba(56, 189, 248, 0.22);
+    color: #38bdf8;
+    box-shadow: 0 0 8px rgba(56, 189, 248, 0.3);
+}
+.exec-mode-pill-btn.active-coupled {
+    background: rgba(245, 158, 11, 0.22);
+    color: #fbbf24;
+    box-shadow: 0 0 8px rgba(245, 158, 11, 0.3);
+}
+.exec-mode-pill-btn.active-coupled.hw-connected {
+    background: rgba(16, 185, 129, 0.22);
+    color: #34d399;
+    box-shadow: 0 0 8px rgba(16, 185, 129, 0.3);
+}
+.exec-mode-pill-btn.active-real-zero {
+    background: rgba(236, 72, 153, 0.28);
+    color: #f472b6;
+    box-shadow: 0 0 10px rgba(236, 72, 153, 0.4);
+}
+.hdr-mode-badge.real-zero {
+    background: rgba(236, 72, 153, 0.18);
+    border: 1px solid rgba(236, 72, 153, 0.45);
+    color: #f472b6;
+    box-shadow: 0 0 10px rgba(236, 72, 153, 0.25);
+}
+

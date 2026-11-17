@@ -1,0 +1,60 @@
+# ==============================================================================
+# .gitignore — Robot Agricole Autonome (Python / FastAPI / Expo / Node.js / IDE)
+# ==============================================================================
+
+# --- Environnements virtuels Python (dossiers et liens symboliques) ---
+.venv
+.venv/
+venv
+venv/
+env
+env/
+ENV/
+.python-version
+
+# --- Caches & artefacts Python / Tests ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# --- Bases de données locales, états runtime & logs ---
+*.sqlite
+*.sqlite3
+*.db
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# --- Node.js / React Native / Expo (dossiers, symlinks et caches binaires) ---
+node_modules
+node_modules/
+.expo/
+.expo-shared/
+.npm/
+.cache/
+web-build/
+
+# --- Configuration système, secrets & IDE ---
+.env
+.env.*
+!.env.example
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+

@@ -1,0 +1,2 @@
+pyserial>=3.5
+# optionnel (vision) : ultralytics>=8.1 opencv-python>=4.8

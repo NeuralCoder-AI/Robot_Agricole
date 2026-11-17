@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="theme-color" content="#070d17">
+    <title>Télécommande Mobile Arachide — Robot Agricole ESP32-S3</title>
+    <link rel="stylesheet" href="/static/css/mobile.css">
+    <script type="module" src="/static/js/mobile/mobile_main.js"></script>
+</head>
+<body>
+    <header>
+        <div class="brand">
+            <h1>🚜 ROBOT AGRICOLE ESP32-S3</h1>
+        </div>
+        <div style="display:flex; gap:6px; align-items:center;">
+            <span id="mobHwStatusBadge" class="badge" style="background:#1e293b; color:#94a3b8;">Simul.</span>
+            <div id="statusBadge" class="badge badge-estop">🛑 ESTOP</div>
+        </div>
+    </header>
+
+    <div class="safety-bar">
+        <button id="btnEstop" class="btn-estop">🛑 ARRÊT D'URGENCE (ESTOP)</button>
+        <button id="btnArm" class="btn-arm">⚡ ARMER (ARM)</button>
+    </div>
+
+    <div class="tabs-bar">
+        <button id="tabBtnWeed" class="tab-btn active-weed">🌿 DÉSHERBAGE</button>
+        <button id="tabBtnSeed" class="tab-btn">🌱 SEMENCE</button>
+        <button id="tabBtnReseed" class="tab-btn">🔍 RÉVISION</button>
+    </div>
+
+    <div class="content">
+        <div id="mobCoupledLockBanner" class="card" style="display:none; background:#7f1d1d; border-color:#dc2626; color:#fee2e2; text-align:center; font-weight:800; font-size:12px;">
+            ⏳ EN ATTENTE DE CONNEXION AU ROBOT PHYSIQUE (ESP32-S3)...
+        </div>
+
+        <div class="card">
+            <div class="card-title">
+                <span>🔌 Mode & Liaison Robot</span>
+                <span id="wsInfoText" style="font-size:10px; color:var(--text-dim);">Connexion...</span>
+            </div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-bottom:8px;">
+                <button id="mobBtnModeSim" class="tab-btn active-weed">🖥️ Simulation</button>
+                <button id="mobBtnModeCoupled" class="tab-btn">🤖 Couplé Robot</button>
+            </div>
+            <div style="display:grid; grid-template-columns:1fr 2fr auto; gap:6px;">
+                <select id="mobHwTransport" style="background:#121f36; color:#fff; border:1px solid #243b61; border-radius:6px; padding:6px; font-size:11px;">
+                    <option value="WIFI_HTTP">Wi-Fi HTTP</option>
+                    <option value="SOCKET_TCP_WS">Socket TCP</option>
+                    <option value="USB_UART">USB-UART</option>
+                </select>
+                <input id="mobHwTarget" type="text" value="192.168.4.1" placeholder="IP/Port" style="background:#121f36; color:#fff; border:1px solid #243b61; border-radius:6px; padding:6px; font-size:11px;">
+                <button id="mobBtnConnectHw" style="background:#0284c7; color:#fff; border:none; border-radius:6px; padding:6px 12px; font-weight:800; font-size:11px; cursor:pointer;">Connecter</button>
+            </div>
+        </div>
+
+        <div id="viewWeeding">
+            <div class="card" style="margin-bottom:12px;">
+                <div class="card-title">
+                    <span>👁️ Caméra IA Arachide (Couloir 46 cm)</span>
+                    <span id="hudDriveCmd" style="color:var(--accent-cyan); font-family:monospace;">DRIVE:24,0:400</span>
+                </div>
+                <div class="hud-canvas-container">
+                    <canvas id="peanutVisionCanvas" class="hud-canvas"></canvas>
+                </div>
+            </div>
+
+            <div class="card" style="margin-bottom:12px;">
+                <div class="card-title"><span>🛠️ Outils Désherbage</span></div>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+                    <button id="btnTinesDown" class="tab-btn" style="background:#1e3a5f; color:#38bdf8;">⬇️ Dents Bas (PULSE:5:50:4000)</button>
+                    <button id="btnTinesUp" class="tab-btn" style="background:#1e3a5f; color:#38bdf8;">⬆️ Dents Haut (PULSE:5:-50:4000)</button>
+                    <button id="btnTillerStart" class="tab-btn" style="background:#064e3b; color:#34d399;">⚡ Fraise Start (M6:70)</button>
+                    <button id="btnTillerStop" class="tab-btn" style="background:#450a0a; color:#f87171;">🛑 Fraise Stop (STOP:6)</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="viewSeeding" style="display:none;">
+            <div class="card" style="margin-bottom:12px;">
+                <div class="card-title"><span>🌱 Semoir Trémie Arachide (M8)</span></div>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+                    <button id="btnSeederPulse" class="tab-btn" style="background:#0e7490; color:#67e8f9;">🌾 Graine Suivante</button>
+                    <button class="tab-btn" style="background:#164e63; color:#a5f3fc;" onclick="wsClient.sendCommand('M8:40')">▶️ Semis Continu</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="viewReseeding" style="display:none;">
+            <div class="card" style="margin-bottom:12px;">
+                <div class="card-title"><span>🔍 Resemence Ciblée (Télémétrie)</span></div>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-bottom:8px;">
+                    <div style="background:#0f172a; padding:6px; border-radius:6px; text-align:center;">
+                        <div style="font-size:10px; color:var(--text-dim);">🎯 Trous</div>
+                        <div id="mobMetricGaps" style="font-size:14px; font-weight:800; color:#facc15;">0</div>
+                    </div>
+                    <div style="background:#0f172a; padding:6px; border-radius:6px; text-align:center;">
+                        <div style="font-size:10px; color:var(--text-dim);">🍂 Morts</div>
+                        <div id="mobMetricDead" style="font-size:14px; font-weight:800; color:#fb7185;">0</div>
+                    </div>
+                    <div style="background:#0f172a; padding:6px; border-radius:6px; text-align:center;">
+                        <div style="font-size:10px; color:var(--text-dim);">🌱 Resemés</div>
+                        <div id="mobMetricSeeds" style="font-size:14px; font-weight:800; color:#34d399;">0</div>
+                    </div>
+                    <div style="background:#0f172a; padding:6px; border-radius:6px; text-align:center;">
+                        <div style="font-size:10px; color:var(--text-dim);">🛤️ Rangs</div>
+                        <div id="mobMetricRows" style="font-size:14px; font-weight:800; color:#38bdf8;">0</div>
+                    </div>
+                </div>
+                <button class="tab-btn" style="background:#0e7490; color:#67e8f9; width:100%;" onclick="wsClient.sendCommand('PULSE:8:60:400')">🌱 Impulsion Semoir M8 (400ms)</button>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-title"><span>🎮 Pilotage Manuel</span></div>
+            <div class="pad-grid">
+                <div></div>
+                <button class="pad-btn" data-pad-cmd="FORWARD">▲</button>
+                <div></div>
+                <button class="pad-btn" data-pad-cmd="LEFT">◀</button>
+                <button class="pad-btn" data-pad-cmd="STOP" style="background:#450a0a; color:#f87171;">■</button>
+                <button class="pad-btn" data-pad-cmd="RIGHT">▶</button>
+                <div></div>
+                <button class="pad-btn" data-pad-cmd="BACKWARD">▼</button>
+                <div></div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">
+                <span>📟 Console Télémétrique</span>
+                <button id="mobBtnClearConsole" style="background:none; border:none; color:var(--text-dim); font-size:10px; cursor:pointer;">🧹 Vider</button>
+            </div>
+            <div id="mobConsoleBox" class="console-box"></div>
+        </div>
+    </div>
+</body>
+</html>
