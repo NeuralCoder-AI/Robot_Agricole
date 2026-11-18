@@ -1891,6 +1891,9 @@
                             <div id="hudHybridBotanicBadge" style="margin-top: 5px; padding: 4px 8px; border-radius: 6px; background: rgba(16, 185, 129, 0.16); border: 1px solid rgba(16, 185, 129, 0.45); color: #6ee7b7; font-weight: 800; font-size: 11px;">
                                 🥜 IA Botanique : Arachide (En attente...)
                             </div>
+                            <div id="hudYoloOnnxBadge" style="margin-top: 5px; padding: 4px 8px; border-radius: 6px; background: rgba(59, 130, 246, 0.16); border: 1px solid rgba(59, 130, 246, 0.45); color: #93c5fd; font-weight: 800; font-size: 11px;">
+                                🎯 Dual-ONNX : YOLOv8n (Obstacles) + MobileNetV3 (Arachide) — Prêt
+                            </div>
                             <div id="hudRobotOrderLive" style="margin-top: 5px; padding: 4px 8px; border-radius: 6px; background: rgba(0, 230, 118, 0.14); border: 1px solid rgba(0, 230, 118, 0.4); color: #6ee7b7; font-weight: 800; font-size: 11px;">
                                 [VISION IA -&gt; ORDRE ROBOT] DRIVE:25,0:250 | Semoir M8: ACTIF | Dents M5: RELEVÉES | Fraise M6: OFF
                             </div>
@@ -8445,6 +8448,17 @@
                     hybridBadge.style.borderColor = isAlert ? "#ef4444" : "#10b981";
                     hybridBadge.style.background = isAlert ? "rgba(239, 68, 68, 0.22)" : "rgba(16, 185, 129, 0.16)";
                     hybridBadge.style.color = isAlert ? "#fca5a5" : "#6ee7b7";
+                }
+                const yoloBadge = document.getElementById("hudYoloOnnxBadge");
+                if (yoloBadge) {
+                    const yLoaded = Boolean(cam.yolo_onnx_loaded ?? cam.telemetry.yolo_onnx_loaded);
+                    const yName = cam.yolo_model_name || cam.telemetry.yolo_model_name || "yolov8n.onnx";
+                    const obsTxt = cam.telemetry.hud_obstacle_summary || "Aucun obstacle dans le couloir";
+                    yoloBadge.innerText = yLoaded
+                        ? `🎯 ${yName} + MobileNetV3 ONNX | ${obsTxt}`
+                        : `📐 Mode Repli OpenCV Sobel/HSV | ${obsTxt}`;
+                    yoloBadge.style.borderColor = cam.telemetry.obstacle_stop ? "#ef4444" : "rgba(59, 130, 246, 0.5)";
+                    yoloBadge.style.color = cam.telemetry.obstacle_stop ? "#fca5a5" : "#93c5fd";
                 }
                 const orderLive = document.getElementById("hudRobotOrderLive");
                 if (orderLive && cam.telemetry.robot_order_str) {

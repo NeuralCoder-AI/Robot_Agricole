@@ -14,6 +14,7 @@ Tests unitaires et d'intégration validant les 5 nouvelles briques d'architectur
 
 import math
 from pathlib import Path
+import cv2
 from fastapi.testclient import TestClient
 
 from backend.config.robot_config import RobotConfigManager, robot_config
@@ -292,3 +293,59 @@ def test_smart_line_end_and_field_end_detection(tmp_path: Path):
     assert engine.state == "MISSION_COMPLETE"
     assert engine.field_end_detected is True
     assert "Fin de parcelle détectée automatiquement" in engine.completion_message
+
+
+def test_yolov8n_onnx_loaded_detects_person_and_exposes_status(tmp_path: Path, client: TestClient):
+    """6. Vérifie le chargement natif `yolov8n.onnx` via `cv2.dnn` (`yolo_onnx_loaded == True`),
+    la détection réelle d'une personne/obstacle avec NMS + transition `WAITING_MOVING_OBSTACLE`,
+    le repli propre si le fichier ONNX est absent, et les champs `/api/camera/status`.
+    """
+    onnx_path = Path(__file__).resolve().parent.parent / "backend" / "models" / "yolov8n.onnx"
+    assert onnx_path.is_file(), f"Modèle yolov8n.onnx introuvable : {onnx_path}"
+    assert onnx_path.stat().st_size > 10_000_000
+
+    # Repli propre si le modèle est absent
+    fallback_yolo = YoloVisionPipeline(onnx_model_path=str(tmp_path / "missing_yolo.onnx"))
+    assert fallback_yolo.yolo_onnx_loaded is False
+    assert fallback_yolo.detect_objects_onnx(cv2.imread(str(Path(__file__).resolve().parent / "assets" / "yolo_test_person_bus.jpg"))) == []
+
+    # Chargement effectif du modèle réel yolov8n.onnx (~12.2 Mo)
+    yolo = YoloVisionPipeline()
+    assert yolo.yolo_onnx_loaded is True
+    assert yolo.yolo_model_name == "yolov8n.onnx"
+
+    sample_path = Path(__file__).resolve().parent / "assets" / "yolo_test_person_bus.jpg"
+    assert sample_path.is_file(), f"Image de test manquante : {sample_path}"
+    frame = cv2.imread(str(sample_path))
+    assert frame is not None and frame.size > 0
+
+    dets = yolo.detect_objects_onnx(frame, conf_thresh=0.40, nms_thresh=0.45)
+    assert len(dets) >= 1
+    person_dets = [d for d in dets if d["class_name"] == "person"]
+    assert len(person_dets) >= 1
+    assert person_dets[0]["conf"] >= 0.40
+    assert person_dets[0]["is_mobile_class"] is True
+    assert person_dets[0]["source"] == "yolov8n.onnx"
+
+    # Vérification de l'intégration complète process_frame() -> WAITING_MOVING_OBSTACLE & HUD
+    annotated, telem = yolo.process_frame(frame, mission="WEEDING")
+    assert annotated.shape == frame.shape
+    assert telem.get("yolo_onnx_loaded") is True
+    assert telem.get("yolo_model_name") == "yolov8n.onnx"
+    assert telem.get("obstacle_state") == "WAITING_MOVING_OBSTACLE"
+    assert telem.get("waiting_moving_obstacle") is True
+    assert "MOBILE" in str(telem.get("hud_obstacle_summary", ""))
+
+    # Vérification REST `/api/camera/status` et `/api/system/info`
+    cam_resp = client.get("/api/camera/status")
+    assert cam_resp.status_code == 200
+    cam_json = cam_resp.json()
+    assert cam_json.get("yolo_onnx_loaded") is True
+    assert cam_json.get("yolo_model_name") == "yolov8n.onnx"
+    assert cam_json.get("onnx_loaded") is True
+
+    sys_resp = client.get("/api/system/info")
+    assert sys_resp.status_code == 200
+    assert sys_resp.json().get("yolo_onnx_loaded") is True
+
+

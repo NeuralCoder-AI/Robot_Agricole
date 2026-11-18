@@ -16,8 +16,10 @@ import numpy as np
 
 try:
     from backend.vision.real_vision_pipeline import RealVisionPipeline
+    from backend.vision.yolo_pipeline import YoloVisionPipeline
 except ImportError:
     from real_vision_pipeline import RealVisionPipeline
+    from yolo_pipeline import YoloVisionPipeline
 
 logger = logging.getLogger("CameraManager")
 
@@ -44,14 +46,10 @@ class CameraManager:
         self.last_error: str = ""
         self.active_device_name: str = "Caméra Non Connectée"
 
-        self.pipeline = RealVisionPipeline(
-            chassis_width_m=1.21,
-            tool_spacing_m=0.46,
-            camera_height_m=0.75,
-            camera_tilt_deg=self.camera_tilt_deg,
-            k1=self.k1,
-            fov_h_deg=76.0,
-        )
+        self.yolo_pipeline = YoloVisionPipeline()
+        self.pipeline: RealVisionPipeline = self.yolo_pipeline.base_pipeline
+        self.pipeline.camera_height_m = 0.75
+        self.pipeline.set_optical_config(k1=self.k1, tilt_deg=self.camera_tilt_deg, fov_h_deg=76.0)
 
         self._cap: Optional[cv2.VideoCapture] = None
         self._lock = threading.RLock()
@@ -273,7 +271,7 @@ class CameraManager:
                 actual_h, actual_w = first_frame.shape[:2]
                 self.width = int(actual_w)
                 self.height = int(actual_h)
-                annotated, telem = self.pipeline.process_frame(first_frame, mission=self.current_mission)
+                annotated, telem = self.yolo_pipeline.process_frame(first_frame, mission=self.current_mission)
                 self._last_frame = first_frame
                 self._last_annotated_frame = annotated
                 self._last_telemetry = telem
@@ -287,7 +285,7 @@ class CameraManager:
                 synth = self.pipeline.generate_synthetic_farm_frame(
                     width=self.width, height=self.height, frame_idx=0, mission=self.current_mission
                 )
-                annotated, telem = self.pipeline.process_frame(synth, mission=self.current_mission)
+                annotated, telem = self.yolo_pipeline.process_frame(synth, mission=self.current_mission)
                 self._last_frame = synth
                 self._last_annotated_frame = annotated
                 self._last_telemetry = telem
@@ -386,7 +384,7 @@ class CameraManager:
                 )
 
             if raw_frame is not None:
-                annotated, telem = self.pipeline.process_frame(
+                annotated, telem = self.yolo_pipeline.process_frame(
                     raw_frame, mission=self.current_mission
                 )
                 with self._lock:
@@ -417,7 +415,7 @@ class CameraManager:
         synth = self.pipeline.generate_synthetic_farm_frame(
             self.width, self.height, self._frame_counter, mission=self.current_mission
         )
-        annotated, telem = self.pipeline.process_frame(synth, mission=self.current_mission)
+        annotated, telem = self.yolo_pipeline.process_frame(synth, mission=self.current_mission)
         with self._lock:
             self._last_telemetry = telem
         return annotated
@@ -429,7 +427,7 @@ class CameraManager:
                 synth = self.pipeline.generate_synthetic_farm_frame(
                     self.width, self.height, self._frame_counter, mission=self.current_mission
                 )
-                _, telem = self.pipeline.process_frame(synth, mission=self.current_mission)
+                _, telem = self.yolo_pipeline.process_frame(synth, mission=self.current_mission)
                 self._last_telemetry = telem
             return dict(self._last_telemetry)
 
@@ -452,9 +450,11 @@ class CameraManager:
             time.sleep(0.035)  # ~28 FPS
 
     def get_status(self) -> Dict[str, Any]:
-        """Retourne l'état complet du gestionnaire caméra."""
+        """Retourne l'état complet du gestionnaire caméra et des modèles Dual-ONNX."""
         pc = getattr(self.pipeline, "peanut_classifier", None)
         onnx_loaded = bool(pc is not None and getattr(pc, "onnx_loaded", False))
+        yolo_onnx_loaded = bool(getattr(self.yolo_pipeline, "yolo_onnx_loaded", False))
+        yolo_model_name = str(getattr(self.yolo_pipeline, "yolo_model_name", "yolov8n.onnx"))
         return {
             "connected": self.connected,
             "is_synthetic": self.is_synthetic,
@@ -469,6 +469,9 @@ class CameraManager:
             "last_error": self.last_error,
             "onnx_loaded": onnx_loaded,
             "model_backend": getattr(pc, "model_backend", "") if pc else "",
+            "yolo_onnx_loaded": yolo_onnx_loaded,
+            "yolo_model_name": yolo_model_name,
+            "dual_onnx_active": bool(onnx_loaded and yolo_onnx_loaded),
             "telemetry": self.get_latest_telemetry(),
         }
 

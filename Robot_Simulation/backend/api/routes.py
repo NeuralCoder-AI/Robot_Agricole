@@ -105,8 +105,11 @@ async def get_camera_devices():
 
 @router.get("/api/camera/status")
 async def get_camera_status():
-    """Retourne l'état courant de la caméra 170° et du pipeline vision."""
-    return camera_manager.get_status()
+    """Retourne l'état courant de la caméra, des modèles Dual-ONNX (YOLOv8n + MobileNetV3) et du pipeline vision."""
+    status = camera_manager.get_status()
+    status.setdefault("yolo_onnx_loaded", bool(getattr(camera_manager.yolo_pipeline, "yolo_onnx_loaded", False)))
+    status.setdefault("yolo_model_name", str(getattr(camera_manager.yolo_pipeline, "yolo_model_name", "yolov8n.onnx")))
+    return status
 
 
 @router.post("/api/camera/connect")
@@ -810,6 +813,7 @@ async def get_system_info():
     robot_uc = target == "ROBOT_UC"
     if robot_uc and server_context.robot and server_context.robot.execution_mode != ExecutionMode.REAL_ZERO_SIM.value:
         server_context.robot.execution_mode = ExecutionMode.REAL_ZERO_SIM.value
+    cam_pc = getattr(camera_manager.pipeline, "peanut_classifier", None)
     return {
         "deployment_target": target,
         "is_robot_uc": robot_uc,
@@ -822,6 +826,9 @@ async def get_system_info():
         ),
         "auto_hardware_boot": robot_uc,
         "mission_running": bool(server_context.robot and server_context.robot.mission_running),
+        "onnx_loaded": bool(cam_pc is not None and getattr(cam_pc, "onnx_loaded", False)),
+        "yolo_onnx_loaded": bool(getattr(camera_manager.yolo_pipeline, "yolo_onnx_loaded", False)),
+        "yolo_model_name": str(getattr(camera_manager.yolo_pipeline, "yolo_model_name", "yolov8n.onnx")),
         "version": auto_deploy_manager.get_version_info(),
     }
 

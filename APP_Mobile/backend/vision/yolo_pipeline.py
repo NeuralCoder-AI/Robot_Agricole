@@ -19,6 +19,7 @@ Pipeline Vision IA Avancé par YOLO (YOLOv8n / YOLO11n `model.track(persist=True
 import logging
 import math
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
@@ -26,10 +27,16 @@ import numpy as np
 
 from backend.config.robot_config import RobotConfigManager, robot_config
 from backend.vision.real_vision_pipeline import RealVisionPipeline
+from backend.vision.yolo_onnx_detector import (
+    COCO_CLASSES,
+    MOBILE_YOLO_CLASSES,
+    MultiObjectCentroidTracker,
+    YoloOnnxDetector,
+)
 
 logger = logging.getLogger("YoloVisionPipeline")
 
-# Import optionnel d'Ultralytics YOLO (bascule automatiquement sur le tracker hybride si absent)
+# Import optionnel d'Ultralytics YOLO (bascule automatiquement sur YOLOv8n ONNX / OpenCV si absent)
 try:
     from ultralytics import YOLO as UltralyticsYOLO  # type: ignore
     ULTRALYTICS_AVAILABLE = True
@@ -38,168 +45,46 @@ except Exception:
     ULTRALYTICS_AVAILABLE = False
 
 
-MOBILE_YOLO_CLASSES = {
-    "person",
-    "human",
-    "humain",
-    "personne",
-    "pedestrian",
-    "worker",
-    "agriculteur",
-    "child",
-    "dog",
-    "cat",
-    "cow",
-    "sheep",
-    "goat",
-    "horse",
-    "bird",
-    "animal",
-    "animal_mobile",
-    "car",
-    "truck",
-    "tractor",
-    "bicycle",
-    "motorcycle",
-    "vehicle",
-    "vehicule",
-}
-
-
-class MultiObjectCentroidTracker:
-    """Suivi multi-objets déterministe compatible `model.track(persist=True)` (assigne et maintient `track_id`)."""
-
-    def __init__(self, max_disappeared: int = 15, max_distance_px: float = 110.0):
-        self._next_id: int = 1
-        self._tracks: Dict[int, Dict[str, Any]] = {}
-        self.max_disappeared = max_disappeared
-        self.max_distance_px = max_distance_px
-
-    def reset(self) -> None:
-        self._tracks.clear()
-        self._next_id = 1
-
-    def update(self, raw_detections: List[Dict[str, Any]], now_ts: Optional[float] = None) -> List[Dict[str, Any]]:
-        """Associe les boîtes détectées aux pistes existantes et calcule la vitesse en pixels."""
-        ts = time.perf_counter() if now_ts is None else float(now_ts)
-        updated_list: List[Dict[str, Any]] = []
-
-        if not raw_detections:
-            to_delete = []
-            for tid, tr in self._tracks.items():
-                tr["disappeared"] = tr.get("disappeared", 0) + 1
-                if tr["disappeared"] > self.max_disappeared:
-                    to_delete.append(tid)
-            for tid in to_delete:
-                del self._tracks[tid]
-            return []
-
-        used_track_ids = set()
-        for det in raw_detections:
-            bbox = det.get("bbox") or det.get("xyxy") or [0, 0, 10, 10]
-            x1, y1, x2, y2 = [float(v) for v in bbox[:4]]
-            cx = float(det.get("cx", (x1 + x2) / 2.0))
-            cy = float(det.get("cy", (y1 + y2) / 2.0))
-            y_bottom = float(det.get("y_bottom", max(y1, y2)))
-
-            explicit_tid = det.get("track_id")
-            matched_tid: Optional[int] = None
-
-            if explicit_tid is not None:
-                matched_tid = int(explicit_tid)
-            else:
-                best_dist = self.max_distance_px
-                for tid, tr in self._tracks.items():
-                    if tid in used_track_ids:
-                        continue
-                    d = math.hypot(cx - tr["cx"], cy - tr["cy"])
-                    if d < best_dist:
-                        best_dist = d
-                        matched_tid = tid
-
-                if matched_tid is None:
-                    matched_tid = self._next_id
-                    self._next_id += 1
-
-            used_track_ids.add(matched_tid)
-            prev = self._tracks.get(matched_tid)
-            if prev is not None:
-                dt = max(1e-3, ts - prev["ts"])
-                dx_px = cx - prev["cx"]
-                dy_px = cy - prev["cy"]
-                disp_px = math.hypot(dx_px, dy_px)
-                speed_px_s = disp_px / dt
-                frames_seen = prev.get("frames_seen", 1) + 1
-            else:
-                dx_px = 0.0
-                dy_px = 0.0
-                disp_px = float(det.get("displacement_px", 0.0))
-                speed_px_s = float(det.get("speed_px_s", 0.0))
-                frames_seen = 1
-
-            cls_name = str(det.get("class_name", det.get("label", "obstacle"))).strip().lower()
-            is_mobile_cls = cls_name in MOBILE_YOLO_CLASSES
-            is_moving_flag = bool(
-                det.get("is_moving", False)
-                or is_mobile_cls
-                or disp_px >= 3.5
-                or speed_px_s >= 12.0
-            )
-
-            track_record = {
-                "track_id": matched_tid,
-                "class_name": cls_name,
-                "conf": float(det.get("conf", 0.88)),
-                "bbox": [round(x1, 1), round(y1, 1), round(x2, 1), round(y2, 1)],
-                "cx": round(cx, 2),
-                "cy": round(cy, 2),
-                "y_bottom": round(y_bottom, 2),
-                "dx_px": round(dx_px, 2),
-                "dy_px": round(dy_px, 2),
-                "displacement_px": round(disp_px, 2),
-                "speed_px_s": round(speed_px_s, 2),
-                "is_mobile_class": is_mobile_cls,
-                "is_moving": is_moving_flag,
-                "frames_seen": frames_seen,
-                "disappeared": 0,
-                "ts": ts,
-            }
-            if "width_m" in det:
-                track_record["width_m"] = float(det["width_m"])
-            if "length_m" in det:
-                track_record["length_m"] = float(det["length_m"])
-            self._tracks[matched_tid] = track_record
-            updated_list.append(dict(track_record))
-
-        return updated_list
-
-
 class YoloVisionPipeline:
     """Pipeline Vision IA unifié basé sur YOLO (`model.track(persist=True)`) + Géométrie Optique Dynamique."""
 
     def __init__(
         self,
         config_manager: Optional[RobotConfigManager] = None,
-        model_path: str = "yolov8n.pt",
+        model_path: str = "yolov8n.onnx",
         pixel_motion_threshold: float = 3.5,
+        onnx_model_path: Optional[str] = None,
     ):
         self.config: RobotConfigManager = config_manager or robot_config
         self.model_path = model_path
         self.pixel_motion_threshold = float(pixel_motion_threshold)
 
-        # Chargement optionnel du modèle Ultralytics YOLOv8n / YOLO11n si disponible localement
+        # Chargement natif léger `yolov8n.onnx` via OpenCV DNN (`cv2.dnn`), sans torch/ultralytics
+        default_onnx = Path(__file__).resolve().parent.parent / "models" / "yolov8n.onnx"
+        if onnx_model_path is not None:
+            resolved_onnx = Path(onnx_model_path) if str(onnx_model_path) else default_onnx
+        elif str(model_path).lower().endswith(".onnx") and str(model_path) != "yolov8n.onnx":
+            resolved_onnx = Path(model_path)
+        else:
+            resolved_onnx = default_onnx
+
+        self.yolo_onnx = YoloOnnxDetector(resolved_onnx)
+        self.yolo_onnx_loaded: bool = bool(self.yolo_onnx.yolo_onnx_loaded)
+        self.yolo_model_name: str = str(self.yolo_onnx.model_name)
+
+        # Chargement optionnel Ultralytics .pt si fourni explicitement et librairie installée
         self.yolo_model: Optional[Any] = None
-        if ULTRALYTICS_AVAILABLE and UltralyticsYOLO is not None:
+        if ULTRALYTICS_AVAILABLE and UltralyticsYOLO is not None and str(model_path).lower().endswith(".pt"):
             try:
                 import os
                 if os.path.isfile(model_path):
                     self.yolo_model = UltralyticsYOLO(model_path)
             except Exception as e:
-                logger.info("Modèle YOLO local non chargé (%s), utilisation du moteur hybride OpenCV+Tracker.", e)
+                logger.info("Modèle Ultralytics .pt non chargé (%s), utilisation YOLOv8n ONNX + OpenCV.", e)
 
         self.tracker = MultiObjectCentroidTracker()
 
-        # Pipeline géométrique OpenCV synchronisé avec robot_config
+        # Pipeline géométrique OpenCV synchronisé avec robot_config et partageant l'instance YOLOv8n ONNX
         specs = self.config.get_specs()
         self.base_pipeline = RealVisionPipeline(
             chassis_width_m=float(specs.get("chassis_width_m", 1.21)),
@@ -208,6 +93,7 @@ class YoloVisionPipeline:
             camera_tilt_deg=float(specs.get("camera_pitch_deg", 32.0)),
             k1=0.0,
             fov_h_deg=float(specs.get("camera_fov_deg", 78.0)),
+            yolo_onnx_detector=self.yolo_onnx,
         )
 
         # État d'auto-calibration de l'angle caméra
@@ -831,8 +717,19 @@ class YoloVisionPipeline:
         return self.base_pipeline.validate_peanut_row_hybrid(frame=frame, roi_box=roi_box, mission_type=mission_type)
 
     # ==========================================================================
-    # EXÉCUTION SUR IMAGE RÉELLE (CAMÉRA + YOLO + HUD)
+    # EXÉCUTION SUR IMAGE RÉELLE (CAMÉRA + YOLOV8N ONNX + HUD)
     # ==========================================================================
+    def detect_objects_onnx(
+        self,
+        frame: np.ndarray,
+        conf_thresh: float = 0.40,
+        nms_thresh: float = 0.45,
+    ) -> List[Dict[str, Any]]:
+        """Infère `yolov8n.onnx` via `cv2.dnn` et renvoie les objets COCO filtrés par NMS."""
+        return self.yolo_onnx.detect_objects_onnx(
+            frame, conf_thresh=conf_thresh, nms_thresh=nms_thresh
+        )
+
     def process_frame(
         self,
         frame: np.ndarray,
@@ -841,9 +738,12 @@ class YoloVisionPipeline:
         speed_mps: float = 0.60,
         injected_detections: Optional[List[Dict[str, Any]]] = None,
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
-        """Exécute le pipeline complet (OpenCV + YOLO Tracking + Auto-Pitch + Fin de Ligne) sur une image."""
+        """Exécute le pipeline complet (OpenCV + YOLOv8n ONNX + Tracking + Auto-Pitch + Fin de Ligne)."""
         annotated, telem = self.base_pipeline.process_frame(frame, mission=mission)
         h, w = annotated.shape[:2]
+
+        telem["yolo_onnx_loaded"] = self.yolo_onnx_loaded
+        telem["yolo_model_name"] = self.yolo_model_name
 
         # 1. Auto-calibration de l'angle caméra si un point de fuite des rangs est estimé
         y_vp = telem.get("vanishing_point_y", h * 0.16)
@@ -851,23 +751,24 @@ class YoloVisionPipeline:
         telem["auto_pitch_deg"] = round(pitch_deg, 2)
         telem["hud_pitch_label"] = f"📐 Angle Caméra Auto : {pitch_deg:.1f}°"
 
-        # 2. Détections YOLO ou conversion des obstacles détectés en pistes suivies
+        # 2. Détections YOLOv8n ONNX + OpenCV fusionnées (ou détections injectées en test)
         raw_dets: List[Dict[str, Any]] = []
         if injected_detections is not None:
             raw_dets = list(injected_detections)
         else:
-            for obs in telem.get("obstacles", []):
-                bx = float(obs.get("x", w // 2))
-                by = float(obs.get("y", h // 2))
-                bw = float(obs.get("w", 40))
-                bh = float(obs.get("h", 40))
+            for obs in telem.get("yolo_detections") or telem.get("obstacles", []):
                 raw_dets.append({
+                    "source": obs.get("source", "hybrid"),
+                    "class_id": obs.get("class_id"),
                     "class_name": obs.get("class_name", "obstacle"),
-                    "bbox": [bx, by, bx + bw, by + bh],
-                    "cx": bx + bw / 2.0,
-                    "cy": by + bh / 2.0,
-                    "y_bottom": by + bh,
-                    "conf": 0.90,
+                    "bbox": obs.get("bbox", [0.0, 0.0, 10.0, 10.0]),
+                    "cx": float(obs.get("cx", w // 2)),
+                    "cy": float(obs.get("cy", h // 2)),
+                    "y_bottom": float(obs.get("y_bottom", h // 2)),
+                    "conf": float(obs.get("conf", 0.88)),
+                    "width_m": float(obs.get("width_m", 0.40)),
+                    "is_mobile_class": bool(obs.get("is_mobile_class", False)),
+                    "is_moving": bool(obs.get("is_moving", False)),
                 })
 
         obs_eval = self.evaluate_obstacle_behavior(raw_dets, img_width=w, img_height=h, dt=dt)
@@ -877,6 +778,17 @@ class YoloVisionPipeline:
         telem["remaining_wait_sec"] = obs_eval["remaining_wait_sec"]
         if obs_eval["hud_banner"]:
             telem["hud_obstacle_banner"] = obs_eval["hud_banner"]
+        if obs_eval.get("blocking_obstacle"):
+            bo = obs_eval["blocking_obstacle"]
+            b_conf = int(round(float(bo.get("conf", 0.0)) * 100))
+            b_state = (
+                f"MOBILE {obs_eval['remaining_wait_sec']:.1f}s"
+                if obs_eval["obstacle_state"] == "WAITING_MOVING_OBSTACLE"
+                else ("MOBILE 5.0s" if bo.get("is_moving") else "STATIQUE")
+            )
+            telem["hud_obstacle_summary"] = (
+                f"#{bo['track_id']} {str(bo['class_name']).upper()} {b_conf}% | {bo['d_sol_m']:.2f}m | {b_state}"
+            )
 
         # 3. Continuité de ligne en bas d'image (pour le mode Fin de Ligne Intelligente)
         line_present = bool(telem.get("guideline_detected", True))
