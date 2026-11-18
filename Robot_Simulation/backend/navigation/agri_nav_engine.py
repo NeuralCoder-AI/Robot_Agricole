@@ -52,6 +52,8 @@ class AgriNavEngine:
         self.bypass_plan_locked: bool = False
         self.locked_plan: Optional[Dict[str, Any]] = None
         self.last_dwa_info: Dict[str, Any] = {}
+        # Localisateur EKF multi-capteurs (GPS RTK ZED-F9P + IMU + Vision locale)
+        self.ekf_localizer: "RtkImuEkfLocalizer" = RtkImuEkfLocalizer()
 
     def lock_bypass_plan(self, plan: Dict[str, Any]) -> None:
         """Verrouille le plan de contournement [W0, W1, W2, W3] et son côté jusqu'à la fin de W3 (Règle 2)."""
@@ -851,4 +853,193 @@ class AgriNavEngine:
             "safe": False,
             "heading_err_deg": round(heading_err_deg, 1),
             "dist_to_target": round(dist_to_target, 3),
+        }
+
+
+class RtkImuEkfLocalizer:
+    """Filtre de Kalman Étendu (EKF) à vecteur d'état x_k = [X, Z, theta, v, omega]^T
+    fusionnant odométrie/IMU + GPS RTK bi-antenne u-blox ZED-F9P (précision 8 mm à 2 cm),
+    avec repli résilient sur la Vision Locale (OpenCV + YOLOv8n + MobileNetV3 ONNX) +
+    Pure Pursuit + DWA en cas d'occultation du signal RTK (architecture CropNav, 2024).
+    """
+
+    def __init__(
+        self,
+        initial_x: float = 0.0,
+        initial_z: float = 0.0,
+        initial_theta: float = 0.0,
+        rtk_pos_std_m: float = 0.015,      # u-blox ZED-F9P RTK fixe (~1,5 cm)
+        rtk_heading_std_rad: float = 0.012, # Bi-antenne (~0,7°)
+        imu_omega_std_rad_s: float = 0.03,
+        vision_lat_std_m: float = 0.035,
+        vision_head_std_rad: float = 0.035,
+    ):
+        self.x_state = np.array(
+            [float(initial_x), float(initial_z), float(initial_theta), 0.0, 0.0],
+            dtype=np.float64,
+        )
+        self.P = np.diag([0.05, 0.05, 0.02, 0.10, 0.05]).astype(np.float64)
+
+        self.Q = np.diag([1e-3, 1e-3, 5e-4, 2e-2, 1e-2]).astype(np.float64)
+        self.R_rtk_pos = np.diag([rtk_pos_std_m ** 2, rtk_pos_std_m ** 2]).astype(np.float64)
+        self.R_rtk_full = np.diag(
+            [rtk_pos_std_m ** 2, rtk_pos_std_m ** 2, rtk_heading_std_rad ** 2]
+        ).astype(np.float64)
+        self.imu_omega_var = float(imu_omega_std_rad_s ** 2)
+        self.vision_lat_var = float(vision_lat_std_m ** 2)
+        self.vision_head_var = float(vision_head_std_rad ** 2)
+
+        self.rtk_available: bool = False
+        self.localization_mode: str = "IMU_ODOM_EKF"
+        self.last_innovation_norm: float = 0.0
+
+    @staticmethod
+    def _wrap_angle(ang: float) -> float:
+        return math.atan2(math.sin(ang), math.cos(ang))
+
+    def reset(self, x: float = 0.0, z: float = 0.0, theta: float = 0.0) -> None:
+        self.x_state = np.array([float(x), float(z), self._wrap_angle(theta), 0.0, 0.0], dtype=np.float64)
+        self.P = np.diag([0.05, 0.05, 0.02, 0.10, 0.05]).astype(np.float64)
+        self.last_innovation_norm = 0.0
+
+    def predict(
+        self,
+        dt: float,
+        v_odom_mps: Optional[float] = None,
+        omega_imu_rad_s: Optional[float] = None,
+        accel_imu_mps2: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Étape de prédiction cinématique + IMU/odométrie avec Jacobienne analytique F_k."""
+        dt_s = max(1e-3, float(dt))
+        x, z, th, v, om = self.x_state
+
+        if v_odom_mps is not None:
+            v_used = float(v_odom_mps)
+        elif accel_imu_mps2 is not None:
+            v_used = float(v) + float(accel_imu_mps2) * dt_s
+        else:
+            v_used = float(v)
+
+        om_used = float(omega_imu_rad_s) if omega_imu_rad_s is not None else float(om)
+
+        x_next = x + v_used * math.sin(th) * dt_s
+        z_next = z + v_used * math.cos(th) * dt_s
+        th_next = self._wrap_angle(th + om_used * dt_s)
+
+        self.x_state = np.array([x_next, z_next, th_next, v_used, om_used], dtype=np.float64)
+
+        # Jacobienne analytique exacte F_k = ∂f/∂x
+        F = np.eye(5, dtype=np.float64)
+        F[0, 2] = v_used * math.cos(th) * dt_s
+        F[0, 3] = math.sin(th) * dt_s
+        F[1, 2] = -v_used * math.sin(th) * dt_s
+        F[1, 3] = math.cos(th) * dt_s
+        F[2, 4] = dt_s
+
+        self.P = F @ self.P @ F.T + self.Q * dt_s
+
+        if omega_imu_rad_s is not None:
+            # Mise à jour scalaire directe sur la vitesse angulaire gyroscopique ω
+            H = np.array([[0.0, 0.0, 0.0, 0.0, 1.0]], dtype=np.float64)
+            S = float((H @ self.P @ H.T)[0, 0] + self.imu_omega_var)
+            K = (self.P @ H.T) / S
+            y = float(omega_imu_rad_s) - self.x_state[4]
+            self.x_state = self.x_state + (K.flatten() * y)
+            self.x_state[2] = self._wrap_angle(self.x_state[2])
+            I_KH = np.eye(5) - K @ H
+            self.P = I_KH @ self.P @ I_KH.T + (K @ K.T) * self.imu_omega_var
+
+        return self.get_state()
+
+    def update_rtk(
+        self,
+        x_gps: float,
+        z_gps: float,
+        theta_dual_ant_rad: Optional[float] = None,
+        rtk_fix: bool = True,
+        age_s: float = 0.0,
+    ) -> Dict[str, Any]:
+        """Correction centimétrique GPS RTK bi-antenne u-blox ZED-F9P (qualité fixe et âge <= 1,5 s)."""
+        if not rtk_fix or float(age_s) > 1.5:
+            self.rtk_available = False
+            self.localization_mode = "LOCAL_VISION_FALLBACK"
+            return self.get_state()
+
+        if theta_dual_ant_rad is not None:
+            H = np.array([
+                [1.0, 0.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0, 0.0],
+            ], dtype=np.float64)
+            z_meas = np.array([float(x_gps), float(z_gps), self._wrap_angle(theta_dual_ant_rad)], dtype=np.float64)
+            R = self.R_rtk_full
+            y = z_meas - (H @ self.x_state)
+            y[2] = self._wrap_angle(y[2])
+        else:
+            H = np.array([
+                [1.0, 0.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0, 0.0],
+            ], dtype=np.float64)
+            z_meas = np.array([float(x_gps), float(z_gps)], dtype=np.float64)
+            R = self.R_rtk_pos
+            y = z_meas - (H @ self.x_state)
+
+        S = H @ self.P @ H.T + R
+        K = self.P @ H.T @ np.linalg.inv(S)
+        self.x_state = self.x_state + K @ y
+        self.x_state[2] = self._wrap_angle(self.x_state[2])
+
+        I_KH = np.eye(5) - K @ H
+        self.P = I_KH @ self.P @ I_KH.T + K @ R @ K.T
+        self.last_innovation_norm = float(np.linalg.norm(y))
+        self.rtk_available = True
+        self.localization_mode = "RTK_EKF_FUSION"
+        return self.get_state()
+
+    def update_vision(
+        self,
+        lateral_err_m: float,
+        heading_err_rad: float,
+        row_center_x_m: float = 0.0,
+        line_angle_rad: float = 0.0,
+    ) -> Dict[str, Any]:
+        """Correction résiliente par Vision Locale (OpenCV + YOLOv8n + MobileNetV3) hors couverture RTK."""
+        # Position latérale X estimée depuis le rang de référence et l'erreur transversale observée
+        x_vis = float(row_center_x_m) + float(lateral_err_m) * math.cos(line_angle_rad)
+        th_vis = self._wrap_angle(float(line_angle_rad) - float(heading_err_rad))
+
+        H = np.array([
+            [1.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0, 0.0],
+        ], dtype=np.float64)
+        R = np.diag([self.vision_lat_var, self.vision_head_var]).astype(np.float64)
+        z_meas = np.array([x_vis, th_vis], dtype=np.float64)
+        y = z_meas - (H @ self.x_state)
+        y[1] = self._wrap_angle(y[1])
+
+        S = H @ self.P @ H.T + R
+        K = self.P @ H.T @ np.linalg.inv(S)
+        self.x_state = self.x_state + K @ y
+        self.x_state[2] = self._wrap_angle(self.x_state[2])
+
+        I_KH = np.eye(5) - K @ H
+        self.P = I_KH @ self.P @ I_KH.T + K @ R @ K.T
+        self.last_innovation_norm = float(np.linalg.norm(y))
+        if not self.rtk_available:
+            self.localization_mode = "LOCAL_VISION_EKF"
+        return self.get_state()
+
+    def get_state(self) -> Dict[str, Any]:
+        pos_std_m = math.sqrt(max(0.0, float(self.P[0, 0] + self.P[1, 1])))
+        return {
+            "x": round(float(self.x_state[0]), 4),
+            "z": round(float(self.x_state[1]), 4),
+            "theta_rad": round(float(self.x_state[2]), 5),
+            "theta_deg": round(math.degrees(self.x_state[2]), 2),
+            "v_mps": round(float(self.x_state[3]), 4),
+            "omega_rad_s": round(float(self.x_state[4]), 5),
+            "localization_mode": self.localization_mode,
+            "rtk_available": self.rtk_available,
+            "pos_std_m": round(pos_std_m, 4),
+            "innovation_norm": round(self.last_innovation_norm, 4),
         }

@@ -26,6 +26,21 @@ try:
 except ImportError:
     from peanut_classifier import PeanutPlantClassifier, SPECIES_PEANUT
 
+try:
+    from backend.vision.yolo_onnx_detector import (
+        AGRI_OBSTACLE_COCO_CLASSES,
+        MultiObjectCentroidTracker,
+        YoloOnnxDetector,
+        merge_yolo_and_opencv_obstacles,
+    )
+except ImportError:
+    from yolo_onnx_detector import (
+        AGRI_OBSTACLE_COCO_CLASSES,
+        MultiObjectCentroidTracker,
+        YoloOnnxDetector,
+        merge_yolo_and_opencv_obstacles,
+    )
+
 
 class RealVisionPipeline:
     """Pipeline OpenCV industriel calibré pour la géométrie réelle du robot (Châssis 1.21 m, Outils ±23 cm)."""
@@ -38,6 +53,7 @@ class RealVisionPipeline:
         camera_tilt_deg: float = 35.0,
         k1: float = 0.0,  # 0.0 par défaut pour la T'nB INCAM1080A (optique rectilinéaire sans distorsion fisheye)
         fov_h_deg: float = 76.0,  # Angle de vue horizontal réel de la T'nB INCAM1080A en 16:9
+        yolo_onnx_detector: Optional[YoloOnnxDetector] = None,
     ):
         self.chassis_width_m = chassis_width_m
         self.tool_spacing_m = tool_spacing_m
@@ -62,8 +78,20 @@ class RealVisionPipeline:
         self._ema_initialized: bool = False
         self._clahe = cv2.createCLAHE(clipLimit=2.2, tileGridSize=(8, 8))
         self.peanut_classifier = PeanutPlantClassifier(confidence_threshold=0.65)
+        self.yolo_onnx_detector = yolo_onnx_detector or YoloOnnxDetector()
+        self.yolo_onnx_loaded: bool = bool(self.yolo_onnx_detector.yolo_onnx_loaded)
+        self.yolo_model_name: str = str(self.yolo_onnx_detector.yolo_model_name)
+        self.obstacle_tracker = MultiObjectCentroidTracker()
         self.consecutive_non_peanut_frames: int = 0
         self.end_of_row_consecutive_frames: int = 5
+
+    def detect_objects_onnx(
+        self, frame: np.ndarray, conf_thresh: float = 0.40, nms_thresh: float = 0.45
+    ) -> List[Dict[str, Any]]:
+        """Exécute `yolov8n.onnx` via OpenCV DNN (`cv2.dnn`) sur une image BGR."""
+        return self.yolo_onnx_detector.detect_objects_onnx(
+            frame, conf_thresh=conf_thresh, nms_thresh=nms_thresh
+        )
 
     def set_optical_config(
         self,
@@ -288,10 +316,14 @@ class RealVisionPipeline:
             "recommended_tools": {},
             "robot_order_str": "DRIVE:25,0:250",
             "hud_message": "",
+            "yolo_onnx_loaded": self.yolo_onnx_loaded,
+            "yolo_model_name": self.yolo_model_name,
+            "yolo_detections": [],
+            "obstacles": [],
         }
 
-        # 3. Détection d'obstacles frontaux multi-critères (active dans toutes les missions)
-        self._detect_obstacles_170(vis, w, h, telemetry)
+        # 3. Détection d'obstacles hybride (YOLOv8n ONNX + OpenCV Sobel/Anomalie Sol)
+        self._detect_obstacles_170(vis, w, h, telemetry, raw_frame=rectified)
 
         # 4. Traitement spécialisé selon la mission
         if mode == "SEEDING":
@@ -400,29 +432,39 @@ class RealVisionPipeline:
         cv2.putText(vis, "AXE (0.0)", (pt_c_bot[0] - 25, h - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 255, 255), 1)
         cv2.putText(vis, "OUTIL D (+23cm)", (pt_tool_r_bot[0] - 50, h - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 255, 120), 1)
 
-    def _detect_obstacles_170(self, vis: np.ndarray, w: int, h: int, telemetry: Dict[str, Any]) -> None:
-        """Détecte les vrais obstacles physiques 3D (rochers, blocs, personnes) dans le couloir de 1.21 m
-        sans jamais confondre un sillon tracé au sol, une plante d'arachide ou un sol uniforme avec un obstacle.
+    def _detect_obstacles_170(
+        self,
+        vis: np.ndarray,
+        w: int,
+        h: int,
+        telemetry: Dict[str, Any],
+        raw_frame: Optional[np.ndarray] = None,
+    ) -> None:
+        """Fusionne la détection sémantique YOLOv8n ONNX (entités mobiles & objets COCO) et
+        OpenCV Sobel/Anomalie Sol (rochers, pierres, souches non-COCO), puis projette chaque
+        piste suivie dans le couloir dynamique du châssis (1,21 m) via (D_sol, X_sol).
         """
+        # 1. Inférence YOLOv8n ONNX (sur image propre avant surimpression HUD)
+        src_frame = raw_frame if raw_frame is not None else vis
+        raw_yolo_dets = self.yolo_onnx_detector.detect_objects_onnx(src_frame, conf_thresh=0.40, nms_thresh=0.45)
+        yolo_dets = [
+            d for d in raw_yolo_dets if str(d.get("class_name", "")).lower() in AGRI_OBSTACLE_COCO_CLASSES
+        ]
+
+        # 2. Détection géométrique complémentaire OpenCV Sobel + Anomalie Sol (rochers/souches)
         roi_top = int(h * 0.32)
         roi_bot = int(h * 0.94)
-        roi = vis[roi_top:roi_bot, :]
-        roi_h, roi_w = roi.shape[:2]
+        roi = src_frame[roi_top:roi_bot, :]
 
-        # 1. Masque de végétation (les plantes vertes ne sont JAMAIS des rochers/obstacles !)
         veg_mask = self._compute_vegetation_mask(roi)
-
-        # 2. Modèle adaptatif de la couleur dominante du sol dans le ROI
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         blurred = cv2.GaussianBlur(gray, (7, 7), 0)
 
-        # Énergie de contours 3D (Sobel X + Y) pour vérifier qu'un candidat a un vrai relief/contour franc
         gx = cv2.Sobel(blurred, cv2.CV_16S, 1, 0, ksize=3)
         gy = cv2.Sobel(blurred, cv2.CV_16S, 0, 1, ksize=3)
         grad_mag = cv2.addWeighted(cv2.convertScaleAbs(gx), 0.5, cv2.convertScaleAbs(gy), 0.5, 0)
 
-        # Écart chromatique & de luminance par rapport à la médiane du sol (hors végétation)
         non_veg = veg_mask == 0
         if np.count_nonzero(non_veg) > 200:
             med_v = float(np.median(hsv[:, :, 2][non_veg]))
@@ -434,8 +476,6 @@ class RealVisionPipeline:
         val_diff = np.abs(hsv[:, :, 2].astype(np.float32) - med_v)
         sat_diff = np.abs(hsv[:, :, 1].astype(np.float32) - med_s)
 
-        # Un obstacle se distingue nettement du sol ambiant (fort contraste de luminance ou de saturation/couleur)
-        # OU est un objet très sombre/rouge/gris franc posé sur le sable
         red_mask1 = cv2.inRange(hsv, np.array([0, 120, 60]), np.array([10, 255, 255]))
         red_mask2 = cv2.inRange(hsv, np.array([165, 120, 60]), np.array([180, 255, 255]))
         anomaly_mask = np.where(
@@ -451,14 +491,9 @@ class RealVisionPipeline:
 
         contours, _ = cv2.findContours(anomaly_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        min_obs_dist = 99.0
-        detected_obs_box = None
-        cx = w / 2.0
-        half_corridor_px_bot = int(w * 0.35)  # Zone frontale d'impact 1.21 m
-
-        # Aire minimale proportionnelle à la résolution (ex: ~0.6% de l'image, soit ~5500 px en 1280x720)
         min_obs_area = max(550, int(w * h * 0.0055))
-        max_obs_area = int(w * h * 0.42)  # Ignorer le fond entier si l'éclairage est uniforme
+        max_obs_area = int(w * h * 0.42)
+        opencv_dets: List[Dict[str, Any]] = []
 
         for cnt in contours:
             area = cv2.contourArea(cnt)
@@ -466,38 +501,102 @@ class RealVisionPipeline:
                 continue
 
             bx, by, bw, bh = cv2.boundingRect(cnt)
-
-            # Exclure les sillons longitudinaux étroits (ex: ligne de semence tracée au sol)
             aspect_box = float(bw) / max(1.0, float(bh))
             if bw < int(w * 0.085) and aspect_box < 0.45:
                 continue
-            # Exclure les bandes horizontales d'ombre pure très plates
             if aspect_box > 4.2 or aspect_box < 0.22:
                 continue
 
-            # Vérifier la solidité géométrique (un vrai rocher/objet est compact, pas un filament)
             solidity = float(area) / max(1.0, float(bw * bh))
             if solidity < 0.40:
                 continue
 
-            # Vérifier l'énergie de contour Sobel sur les bords de l'objet (relief 3D réel)
             patch_grad = grad_mag[by : by + bh, bx : bx + bw]
             if patch_grad.size == 0 or float(np.mean(patch_grad)) < 14.0:
                 continue
 
             abs_y_bot = roi_top + by + bh
-            abs_x_center = bx + bw // 2
-            dist_m = self._estimate_distance_from_y(abs_y_bot, h)
+            abs_y_top = roi_top + by
+            opencv_dets.append({
+                "source": "opencv_sobel",
+                "class_id": -1,
+                "class_name": "obstacle_sol",
+                "conf": 0.85,
+                "bbox": [float(bx), float(abs_y_top), float(bx + bw), float(abs_y_bot)],
+                "x": int(bx),
+                "y": int(abs_y_top),
+                "w": int(bw),
+                "h": int(bh),
+                "cx": round(bx + bw / 2.0, 2),
+                "cy": round(abs_y_top + bh / 2.0, 2),
+                "y_bottom": float(abs_y_bot),
+                "is_mobile_class": False,
+                "is_moving": False,
+            })
 
-            is_in_chassis_corridor = abs(abs_x_center - cx) < (half_corridor_px_bot * max(0.45, abs_y_bot / float(h)))
+        # 3. Fusion YOLOv8n ONNX + OpenCV & suivi multi-objets par centroïde
+        merged_dets = merge_yolo_and_opencv_obstacles(yolo_dets, opencv_dets, iou_thresh=0.35)
+        tracked_dets = self.obstacle_tracker.update(merged_dets)
 
-            if is_in_chassis_corridor and dist_m < min_obs_dist:
-                min_obs_dist = dist_m
-                detected_obs_box = (bx, roi_top + by, bw, bh)
+        fov_deg = max(30.0, min(170.0, float(self.fov_h_deg)))
+        fx = (float(w) / 2.0) / math.tan(math.radians(fov_deg / 2.0))
+        half_robot_w = self.chassis_width_m / 2.0
+        corridor_margin = 0.08
 
-        if detected_obs_box and min_obs_dist <= 4.5:
-            bx, by, bw, bh = detected_obs_box
-            # Déterminer le côté le plus dégagé pour contourner (Gauche = +1, Droite = -1)
+        corridor_blockers: List[Dict[str, Any]] = []
+        for tr in tracked_dets:
+            x1, y1, x2, y2 = [int(round(v)) for v in tr["bbox"]]
+            bw_px = max(1, x2 - x1)
+            bh_px = max(1, y2 - y1)
+            d_sol, x_sol = self.compute_ground_projection(tr["y_bottom"], tr["cx"], w, h)
+            obs_w_m = round(max(0.25, min(2.5, d_sol * (bw_px / max(1.0, fx)))), 3)
+            collision_half_w = (obs_w_m / 2.0) + half_robot_w + corridor_margin
+            in_corridor = abs(x_sol) <= collision_half_w
+
+            tr["x"] = x1
+            tr["y"] = y1
+            tr["w"] = bw_px
+            tr["h"] = bh_px
+            tr["d_sol_m"] = d_sol
+            tr["x_sol_m"] = x_sol
+            tr["dist_m"] = d_sol
+            tr["x_m"] = x_sol
+            tr["width_m"] = obs_w_m
+            tr["in_corridor"] = in_corridor
+
+            if d_sol <= 6.0:
+                is_mob = bool(tr.get("is_moving") or tr.get("is_mobile_class"))
+                state_tag = "MOBILE 5.0s" if is_mob else "STATIQUE"
+                conf_pct = int(round(float(tr.get("conf", 0.0)) * 100))
+                box_color = (
+                    (0, 0, 255)
+                    if (in_corridor and d_sol <= 1.45)
+                    else ((0, 165, 255) if (in_corridor or is_mob) else (255, 210, 0))
+                )
+                cv2.rectangle(vis, (x1, y1), (x2, y2), box_color, 2 if not in_corridor else 3)
+                hud_box_txt = f"#{tr['track_id']} {tr['class_name'].upper()} {conf_pct}% | D={d_sol:.2f}m | {state_tag}"
+                cv2.putText(
+                    vis,
+                    hud_box_txt,
+                    (max(8, x1), max(82, y1 - 8)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.48,
+                    box_color,
+                    2,
+                    cv2.LINE_AA,
+                )
+
+            if in_corridor and d_sol <= 4.5:
+                corridor_blockers.append(tr)
+
+        telemetry["yolo_detections"] = tracked_dets
+        telemetry["obstacles"] = tracked_dets
+
+        if corridor_blockers:
+            primary = min(corridor_blockers, key=lambda o: o["d_sol_m"])
+            min_obs_dist = float(primary["d_sol_m"])
+            bx = int(primary["x"])
+            bw = int(primary["w"])
             left_free_px = bx
             right_free_px = w - (bx + bw)
             bypass_side = 1 if left_free_px >= right_free_px else -1
@@ -508,23 +607,24 @@ class RealVisionPipeline:
             telemetry["obstacle_dist_m"] = round(min_obs_dist, 2)
             telemetry["min_distance_m"] = round(min_obs_dist, 2)
             telemetry["recommended_bypass_side"] = bypass_side
+            telemetry["blocking_obstacle_class"] = primary["class_name"]
+            telemetry["blocking_obstacle_conf"] = round(float(primary["conf"]), 3)
+            telemetry["blocking_obstacle_track_id"] = int(primary["track_id"])
+            telemetry["blocking_obstacle_mobile"] = bool(primary.get("is_moving") or primary.get("is_mobile_class"))
 
             is_critical = min_obs_dist <= 1.45
             telemetry["obstacle_stop"] = is_critical
             telemetry["emergency_stop"] = is_critical
-
-            color = (0, 0, 255) if is_critical else (0, 165, 255)
-            cv2.rectangle(vis, (bx, by), (bx + bw, by + bh), color, 3)
-
-            alert_text = (
-                f"OBSTACLE {min_obs_dist:.2f}m -> CONTOURNER {side_str}"
-                if is_critical
-                else f"OBSTACLE {min_obs_dist:.2f}m ({side_str} LIBRE)"
+            p_conf = int(round(float(primary["conf"]) * 100))
+            p_state = "MOBILE 5.0s" if telemetry["blocking_obstacle_mobile"] else "STATIQUE"
+            telemetry["hud_obstacle_summary"] = (
+                f"#{primary['track_id']} {primary['class_name'].upper()} {p_conf}% | {min_obs_dist:.2f}m | {p_state}"
             )
-            cv2.putText(vis, alert_text, (max(8, bx), max(72, by - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
 
             if is_critical:
-                telemetry["hud_message"] = f"OBSTACLE À {min_obs_dist:.2f}m — ARRÊT & CONTOURNEMENT {side_str}"
+                telemetry["hud_message"] = (
+                    f"{primary['class_name'].upper()} #{primary['track_id']} ({p_conf}%) À {min_obs_dist:.2f}m [{p_state}] -> {side_str}"
+                )
                 telemetry["recommended_drive"] = {"a": 0, "d": 0, "ms": 500}
                 telemetry["recommended_tools"] = {"tines_depth": 0.0, "cutter_m6": 0}
         else:
@@ -534,6 +634,13 @@ class RealVisionPipeline:
             telemetry["obstacle_stop"] = False
             telemetry["emergency_stop"] = False
             telemetry["recommended_bypass_side"] = 0
+            if tracked_dets:
+                first_obj = min(tracked_dets, key=lambda o: o["d_sol_m"])
+                f_conf = int(round(float(first_obj["conf"]) * 100))
+                f_state = "MOBILE 5.0s" if (first_obj.get("is_moving") or first_obj.get("is_mobile_class")) else "STATIQUE"
+                telemetry["hud_obstacle_summary"] = (
+                    f"#{first_obj['track_id']} {first_obj['class_name'].upper()} {f_conf}% | {first_obj['d_sol_m']:.2f}m | {f_state}"
+                )
 
     def _process_mission_seeding(self, vis: np.ndarray, w: int, h: int, telemetry: Dict[str, Any]) -> None:
         """Mission 1 (SEEDING) : Détection et suivi haute précision de la ligne directrice tracée au sol
@@ -1065,6 +1172,19 @@ class RealVisionPipeline:
             (80, 255, 160) if not telemetry.get("obstacle_stop", False) else (80, 80, 255),
             1,
         )
+        obs_hud = telemetry.get("hud_obstacle_summary")
+        yolo_tag = "YOLOv8n.onnx" if telemetry.get("yolo_onnx_loaded") else "OpenCV"
+        chip_txt = f"[{yolo_tag}] {obs_hud}" if obs_hud else f"[{yolo_tag} + MobileNetV3]"
+        chip_sz = cv2.getTextSize(chip_txt, cv2.FONT_HERSHEY_SIMPLEX, 0.40, 1)[0]
+        cv2.putText(
+            vis,
+            chip_txt,
+            (max(12, w - chip_sz[0] - 12), banner_h + 20),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.40,
+            (255, 220, 100),
+            1,
+        )
 
         # Badge Hybride Binaire (Arachide vs Sol Nu + OpenCV)
         hybrid_badge = telemetry.get("hybrid_hud_badge")
@@ -1083,7 +1203,7 @@ class RealVisionPipeline:
     def generate_synthetic_farm_frame(
         self, width: int = 640, height: int = 480, frame_idx: int = 0, mission: Optional[str] = None
     ) -> np.ndarray:
-        """Génère une image réaliste d'un champ d'arachide au Sénégal pour tester à 100% sans caméra branchée."""
+        """Génère une image réaliste d'un champ d'arachide au Niger pour tester à 100% sans caméra branchée."""
         frame = np.full((height, width, 3), (92, 168, 224), dtype=np.uint8)
 
         noise = np.random.randint(-12, 12, (height, width, 3), dtype=np.int16)

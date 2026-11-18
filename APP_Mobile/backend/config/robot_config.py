@@ -33,6 +33,13 @@ CONFIG_DIR = Path(__file__).resolve().parent
 SQLITE_SPECS_PATH = CONFIG_DIR / "robot_specs.sqlite"
 JSON_SPECS_PATH = CONFIG_DIR / "robot_specs.json"
 
+# Constantes agronomiques validées pour le Niger (Bakoye et al., 2020)
+SAHEL_THEORETICAL_INTER_ROW_CM_RANGE = (30.0, 40.0)
+MECHANICAL_NOZZLE_SPACING_CM = 46.0
+SEED_DEPTH_TARGET_CM = 5.0
+SAHEL_INTRA_ROW_SPACING_CM_DEFAULT = 15.0
+INTRA_ROW_SPACING_CM_RANGE = (10.0, 20.0)
+
 
 def get_deployment_target() -> str:
     """Retourne le profil de déploiement actif : `ROBOT_UC` (embarqué 100 % réel) ou `DEV_FULL` (PC dev)."""
@@ -61,6 +68,10 @@ DEFAULT_DYNAMIC_SPECS: Dict[str, Any] = {
     "camera_fov_deg": 78.0,
     "camera_pitch_deg": 32.0,
     "auto_pitch": True,
+    # Paramètres agronomiques Niger / Sahel (Bakoye et al., 2020)
+    "seed_depth_cm": SEED_DEPTH_TARGET_CM,
+    "intra_row_seed_spacing_cm": SAHEL_INTRA_ROW_SPACING_CM_DEFAULT,
+    "agronomic_preset": "NIGER_SAHEL_OPTIMAL",
     # Paramètres Obstacles Mobiles & Fin de Ligne Intelligente
     "moving_obstacle_wait_sec": 5.0,
     "stop_threshold_m": 1.20,
@@ -141,6 +152,11 @@ class RobotConfigManager:
         moving_obstacle_wait_sec = max(0.5, float(merged.get("moving_obstacle_wait_sec", 5.0)))
         stop_threshold_m = max(0.30, float(merged.get("stop_threshold_m", 1.20)))
         line_end_confirm_dist_m = max(0.10, float(merged.get("line_end_confirm_dist_m", 0.50)))
+        seed_depth_cm = max(4.0, min(6.0, float(merged.get("seed_depth_cm", SEED_DEPTH_TARGET_CM))))
+        intra_row_seed_spacing_cm = max(
+            10.0,
+            min(20.0, float(merged.get("intra_row_seed_spacing_cm", SAHEL_INTRA_ROW_SPACING_CM_DEFAULT))),
+        )
 
         merged["chassis_width_m"] = round(chassis_width_m, 4)
         merged["chassis_length_m"] = round(chassis_length_m, 4)
@@ -157,6 +173,11 @@ class RobotConfigManager:
         merged["moving_obstacle_wait_sec"] = round(moving_obstacle_wait_sec, 2)
         merged["stop_threshold_m"] = round(stop_threshold_m, 3)
         merged["line_end_confirm_dist_m"] = round(line_end_confirm_dist_m, 3)
+        merged["seed_depth_cm"] = round(seed_depth_cm, 2)
+        merged["intra_row_seed_spacing_cm"] = round(intra_row_seed_spacing_cm, 2)
+        merged["sahel_theoretical_inter_row_cm_range"] = list(SAHEL_THEORETICAL_INTER_ROW_CM_RANGE)
+        merged["mechanical_nozzle_spacing_cm"] = MECHANICAL_NOZZLE_SPACING_CM
+        merged["configurable_tool_spacing_m_range"] = [0.30, 0.50]
 
         # Grandeurs dérivées dynamiques obligatoires
         merged["chassis_half_width_m"] = round(chassis_width_m / 2.0, 4)
@@ -340,6 +361,14 @@ class RobotConfigManager:
     @property
     def moving_obstacle_wait_sec(self) -> float:
         return float(self._specs.get("moving_obstacle_wait_sec", 5.0))
+
+    @property
+    def seed_depth_cm(self) -> float:
+        return float(self._specs.get("seed_depth_cm", SEED_DEPTH_TARGET_CM))
+
+    @property
+    def intra_row_seed_spacing_cm(self) -> float:
+        return float(self._specs.get("intra_row_seed_spacing_cm", SAHEL_INTRA_ROW_SPACING_CM_DEFAULT))
 
 
 # Singleton global partagé

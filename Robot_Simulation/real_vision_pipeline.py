@@ -1203,7 +1203,7 @@ class RealVisionPipeline:
     def generate_synthetic_farm_frame(
         self, width: int = 640, height: int = 480, frame_idx: int = 0, mission: Optional[str] = None
     ) -> np.ndarray:
-        """Génère une image réaliste d'un champ d'arachide au Sénégal pour tester à 100% sans caméra branchée."""
+        """Génère une image réaliste d'un champ d'arachide au Niger pour tester à 100% sans caméra branchée."""
         frame = np.full((height, width, 3), (92, 168, 224), dtype=np.uint8)
 
         noise = np.random.randint(-12, 12, (height, width, 3), dtype=np.int16)

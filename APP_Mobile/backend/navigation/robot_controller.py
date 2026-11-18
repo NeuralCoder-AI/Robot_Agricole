@@ -21,7 +21,11 @@ import numpy as np
 
 from esp32_simulator import VirtualESP32FirmwareV2
 from ai_vision_brain import AIVisionBrain, SIM_CM_TO_3D
-from agri_nav_engine import AgriNavEngine
+from agri_nav_engine import AgriNavEngine, RtkImuEkfLocalizer
+try:
+    from backend.hardware.solar_bms import SolarBMS
+except ImportError:
+    from solar_bms import SolarBMS
 try:
     from backend.navigation.obstacle_avoidance import SymmetricTrapezoidPlanner
 except ImportError:
@@ -31,9 +35,19 @@ try:
 except ImportError:
     from kinematic_engine import KinematicEngine
 try:
-    from backend.navigation.reseeding_planner import ReseedingPlanner
+    from backend.navigation.reseeding_planner import (
+        ReseedingPlanner,
+        SeedMapMemory,
+        SAHEL_INTRA_ROW_PRESET_CM,
+        SEED_DEPTH_TARGET_CM,
+    )
 except ImportError:
-    from reseeding_planner import ReseedingPlanner
+    from reseeding_planner import (
+        ReseedingPlanner,
+        SeedMapMemory,
+        SAHEL_INTRA_ROW_PRESET_CM,
+        SEED_DEPTH_TARGET_CM,
+    )
 try:
     from backend.config.robot_config import robot_config, is_robot_uc_mode, get_deployment_target
 except ImportError:
@@ -102,7 +116,11 @@ DEFAULT_ROBOT_SPECS: Dict[str, Any] = {
     "seed_drop_height_cm": 14.0,
     "seeder_nozzles_count": 2,
     "seeder_row_spacing_cm": 46.0,
-    "seed_spacing_cm": 30.0,
+    "mechanical_nozzle_spacing_cm": 46.0,
+    "sahel_theoretical_inter_row_min_cm": 30.0,
+    "sahel_theoretical_inter_row_max_cm": 40.0,
+    "seed_spacing_cm": 15.0,  # Préréglage sahélien Niger 10–15 cm (configurable 10–20 cm)
+    "seed_depth_cm": 5.0,     # Profondeur cible 4,0 à 6,0 cm (Bakoye et al., 2020)
     "seed_with_tines_down": True,
     # 5. Panneaux Solaires Double Vantail (M7) & Caméra IA
     "solar_closed_length_cm": 173.0,
@@ -231,13 +249,17 @@ class RobotController:
             start_z=float(self.robot_z),
             step_dir=self.progression_direction,
         )
+        self.seed_map: SeedMapMemory = SeedMapMemory()
         self.reseeding_planner: ReseedingPlanner = ReseedingPlanner(
             seeder_row_spacing_m=0.46,
             seeder_rear_offset_m=0.85,
-            nominal_seed_gap_cm=20.0,
+            nominal_seed_gap_cm=max(10.0, min(20.0, float(self.seed_spacing_cm))),
             gap_detection_threshold_cm=35.0,
             camera_lookahead_m=1.80,
+            seed_depth_cm=float(self.robot_specs.get("seed_depth_cm", SEED_DEPTH_TARGET_CM)),
+            seed_map=self.seed_map,
         )
+        self.solar_bms: SolarBMS = SolarBMS()
         self.reseeded_seeds_count: int = 0
         self.dead_plants_count: int = 0
         self.gaps_detected_count: int = 0
@@ -248,6 +270,7 @@ class RobotController:
         self.vision_brain: AIVisionBrain = AIVisionBrain()
         self.vision_brain.set_robot_specs(self.robot_specs)
         self.nav_engine: AgriNavEngine = AgriNavEngine(self.robot_specs)
+        self.ekf_localizer: RtkImuEkfLocalizer = self.nav_engine.ekf_localizer
         self._last_3d_feedback_time: float = 0.0
         self._last_telem_calc_time: float = time.perf_counter()
 
@@ -448,6 +471,8 @@ class RobotController:
                 else "⚪ Simulation Virtuelle"
             )
         )
+        if hasattr(self, "solar_bms") and self.solar_bms:
+            st["solar_bms"] = self.solar_bms.get_status()
         return st
 
     def _on_camera_vision_order(self, order_str: str, telem: Dict[str, Any]) -> None:
@@ -802,7 +827,7 @@ class RobotController:
                     else:
                         combined[k] = v
             self.robot_specs = self._normalize_specs_dict(combined)
-            self.seed_spacing_cm = max(5, min(250, int(round(float(self.robot_specs.get("seed_spacing_cm", 30))))))
+            self.seed_spacing_cm = max(10, min(20, int(round(float(self.robot_specs.get("seed_spacing_cm", 15))))))
             self.seeding_use_tines = bool(self.robot_specs.get("seed_with_tines_down", True))
             self._save_robot_specs(self.robot_specs)
             if hasattr(self, "vision_brain") and self.vision_brain:
@@ -862,7 +887,7 @@ class RobotController:
         """Configure l'espacement entre 2 pieds d'arachide (cm), les dents M5 et les dimensions Longueur × Largeur (m)."""
         spec_updates: Dict[str, Any] = {}
         if spacing_cm is not None:
-            self.seed_spacing_cm = max(5, min(250, int(spacing_cm)))
+            self.seed_spacing_cm = max(10, min(20, int(spacing_cm)))
             spec_updates["seed_spacing_cm"] = float(self.seed_spacing_cm)
         if auto_seed is not None:
             self.auto_seed_enabled = bool(auto_seed)
@@ -938,6 +963,14 @@ class RobotController:
             "dead_plants_count": self.dead_plants_count,
             "gaps_detected_count": self.gaps_detected_count,
             "reviewed_rows_count": self.reviewed_rows_count,
+            "seed_depth_cm": round(float(self.robot_specs.get("seed_depth_cm", 5.0)), 1),
+            "sahel_intra_row_preset_cm": 15.0,
+            "intra_row_spacing_cm_range": [10.0, 20.0],
+            "sahel_theoretical_inter_row_cm_range": [30.0, 40.0],
+            "mechanical_nozzle_spacing_cm": 46.0,
+            "seed_map_count": len(self.seed_map.seeds) if hasattr(self, "seed_map") else 0,
+            "ekf_localization": self.ekf_localizer.get_state() if hasattr(self, "ekf_localizer") else {},
+            "solar_bms": self.solar_bms.get_status() if hasattr(self, "solar_bms") else {},
             "robot_x": round(self.robot_x, 3),
             "robot_z": round(self.robot_z, 3),
             "robot_yaw_deg": round(math.degrees(self.robot_yaw), 1),
@@ -1048,6 +1081,15 @@ class RobotController:
                             self._distance_since_last_seed_cm -= self.seed_spacing_cm
                             if not has_3d_client:
                                 self.seeds_sown += nozzles
+                            if hasattr(self, "seed_map"):
+                                self.seed_map.record_nozzle_pass(
+                                    robot_x=self.robot_x,
+                                    robot_z=self.robot_z,
+                                    robot_yaw_rad=self.robot_yaw,
+                                    seeder_row_spacing_m=float(self.robot_specs.get("seeder_row_spacing_cm", 46.0)) / 100.0,
+                                    depth_cm=float(self.robot_specs.get("seed_depth_cm", 5.0)),
+                                    spacing_cm=float(self.seed_spacing_cm),
+                                )
                         if m_speeds[7] == 0:
                             self._trigger_seed_pulse_nonblocking()
                 elif m_speeds[7] > 10 and not has_3d_client:
@@ -1055,6 +1097,18 @@ class RobotController:
                     if self._distance_since_last_seed_cm >= self.seed_spacing_cm:
                         self._distance_since_last_seed_cm -= self.seed_spacing_cm
                         self.seeds_sown += nozzles
+                        if hasattr(self, "seed_map"):
+                            self.seed_map.record_nozzle_pass(
+                                robot_x=self.robot_x,
+                                robot_z=self.robot_z,
+                                robot_yaw_rad=self.robot_yaw,
+                                seeder_row_spacing_m=float(self.robot_specs.get("seeder_row_spacing_cm", 46.0)) / 100.0,
+                                depth_cm=float(self.robot_specs.get("seed_depth_cm", 5.0)),
+                                spacing_cm=float(self.seed_spacing_cm),
+                            )
+
+            if hasattr(self, "solar_bms") and self.solar_bms:
+                self.solar_bms.step(dt=dt, motor_pwms=m_speeds, solar_deploy_ratio=self.solar_angle)
 
             if not has_3d_client:
                 # Profondeur des dents M5

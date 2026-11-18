@@ -1769,11 +1769,11 @@
                         </div>
                     </div>
                     <div class="spec-field-row">
-                        <span>Espacement semence X (cm)</span>
+                        <span>Espacement semence X (cm, 10–20)</span>
                         <div class="spec-stepper">
-                            <button type="button" onclick="stepSpecField('spec_seed_spacing_cm', -5)">-</button>
-                            <input type="number" id="spec_seed_spacing_cm" step="1" value="30">
-                            <button type="button" onclick="stepSpecField('spec_seed_spacing_cm', 5)">+</button>
+                            <button type="button" onclick="stepSpecField('spec_seed_spacing_cm', -1)">-</button>
+                            <input type="number" id="spec_seed_spacing_cm" min="10" max="20" step="1" value="15">
+                            <button type="button" onclick="stepSpecField('spec_seed_spacing_cm', 1)">+</button>
                         </div>
                     </div>
                     <div class="spec-field-row">
@@ -2476,7 +2476,8 @@
             seed_drop_height_cm: 14.0,
             seeder_nozzles_count: 2,
             seeder_row_spacing_cm: 46.0,
-            seed_spacing_cm: 30.0,
+            seed_spacing_cm: 15.0,
+            seed_depth_cm: 5.0,
             seed_with_tines_down: true,
             solar_closed_length_cm: 173.0,
             solar_closed_width_cm: 106.0,

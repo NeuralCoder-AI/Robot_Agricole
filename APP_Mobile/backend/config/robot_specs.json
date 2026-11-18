@@ -12,10 +12,22 @@
   "camera_fov_deg": 78.0,
   "camera_pitch_deg": 32.0,
   "auto_pitch": true,
+  "seed_depth_cm": 5.0,
+  "intra_row_seed_spacing_cm": 15.0,
+  "agronomic_preset": "NIGER_SAHEL_OPTIMAL",
   "moving_obstacle_wait_sec": 5.0,
   "stop_threshold_m": 1.2,
   "line_end_confirm_dist_m": 0.5,
   "field_boundary_mode": "FIXED_DIMENSIONS",
+  "sahel_theoretical_inter_row_cm_range": [
+    30.0,
+    40.0
+  ],
+  "mechanical_nozzle_spacing_cm": 46.0,
+  "configurable_tool_spacing_m_range": [
+    0.3,
+    0.5
+  ],
   "chassis_half_width_m": 0.605,
   "tool_half_offset_m": 0.23,
   "central_guide_spacing_m": 0.92,
