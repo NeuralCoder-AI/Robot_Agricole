@@ -893,14 +893,46 @@ class RtkImuEkfLocalizer:
         self.localization_mode: str = "IMU_ODOM_EKF"
         self.last_innovation_norm: float = 0.0
 
+        # Métadonnées GPS-RTK u-blox ZED-F9P & IMU MPU-9250 (architecture_integration_GPS_RTK_vision)
+        self.gps_module: str = "u-blox ZED-F9P"
+        self.imu_model: str = "MPU-9250"
+        self.rtk_baudrate: int = 38400
+        self.rtcm3_source: str = "RADIO_433_868_OR_NTRIP"
+        self.gga_quality: int = 0
+        self.gga_quality_label: str = "NO_FIX"
+        self.num_satellites: int = 0
+        self.hdop: float = 99.0
+        self.gps_age_s: float = 99.0
+        self.heading_source: str = "IMU_EKF"
+        self._last_nmea_pos: Optional[Any] = None
+
     @staticmethod
     def _wrap_angle(ang: float) -> float:
         return math.atan2(math.sin(ang), math.cos(ang))
+
+    @staticmethod
+    def _gga_quality_label(quality: int) -> str:
+        return {
+            0: "NO_FIX",
+            1: "GPS_STANDALONE",
+            2: "DGPS",
+            3: "PPS_FIX",
+            4: "RTK_FIXED",
+            5: "RTK_FLOAT",
+            6: "ESTIMATED",
+        }.get(int(quality), f"UNKNOWN_{quality}")
 
     def reset(self, x: float = 0.0, z: float = 0.0, theta: float = 0.0) -> None:
         self.x_state = np.array([float(x), float(z), self._wrap_angle(theta), 0.0, 0.0], dtype=np.float64)
         self.P = np.diag([0.05, 0.05, 0.02, 0.10, 0.05]).astype(np.float64)
         self.last_innovation_norm = 0.0
+        self.gga_quality = 0
+        self.gga_quality_label = "NO_FIX"
+        self.num_satellites = 0
+        self.hdop = 99.0
+        self.gps_age_s = 99.0
+        self.heading_source = "IMU_EKF"
+        self._last_nmea_pos = None
 
     def predict(
         self,
@@ -958,11 +990,24 @@ class RtkImuEkfLocalizer:
         theta_dual_ant_rad: Optional[float] = None,
         rtk_fix: bool = True,
         age_s: float = 0.0,
+        gga_quality: Optional[int] = None,
+        num_satellites: Optional[int] = None,
+        hdop: Optional[float] = None,
     ) -> Dict[str, Any]:
-        """Correction centimétrique GPS RTK bi-antenne u-blox ZED-F9P (qualité fixe et âge <= 1,5 s)."""
-        if not rtk_fix or float(age_s) > 1.5:
+        """Correction centimétrique GPS RTK u-blox ZED-F9P (qualité GGA = 4 fixe et âge <= 1,5 s)."""
+        qual = int(gga_quality) if gga_quality is not None else (4 if rtk_fix else 0)
+        self.gga_quality = qual
+        self.gga_quality_label = self._gga_quality_label(qual)
+        self.gps_age_s = max(0.0, float(age_s))
+        if num_satellites is not None:
+            self.num_satellites = int(num_satellites)
+        if hdop is not None:
+            self.hdop = float(hdop)
+
+        if (not rtk_fix) or (qual != 4) or (self.gps_age_s > 1.5):
             self.rtk_available = False
             self.localization_mode = "LOCAL_VISION_FALLBACK"
+            self.heading_source = "IMU_OR_VISION"
             return self.get_state()
 
         if theta_dual_ant_rad is not None:
@@ -975,6 +1020,7 @@ class RtkImuEkfLocalizer:
             R = self.R_rtk_full
             y = z_meas - (H @ self.x_state)
             y[2] = self._wrap_angle(y[2])
+            self.heading_source = "RTK_OR_IMU_FUSED"
         else:
             H = np.array([
                 [1.0, 0.0, 0.0, 0.0, 0.0],
@@ -983,6 +1029,7 @@ class RtkImuEkfLocalizer:
             z_meas = np.array([float(x_gps), float(z_gps)], dtype=np.float64)
             R = self.R_rtk_pos
             y = z_meas - (H @ self.x_state)
+            self.heading_source = "IMU_EKF"
 
         S = H @ self.P @ H.T + R
         K = self.P @ H.T @ np.linalg.inv(S)
@@ -995,6 +1042,108 @@ class RtkImuEkfLocalizer:
         self.rtk_available = True
         self.localization_mode = "RTK_EKF_FUSION"
         return self.get_state()
+
+    def update_rtk_gga(
+        self,
+        x_gps: float,
+        z_gps: float,
+        gga_quality: int = 4,
+        age_s: float = 0.0,
+        heading_deg: Optional[float] = None,
+        speed_mps: float = 0.0,
+        num_satellites: int = 0,
+        hdop: float = 99.0,
+        imu_heading_rad: Optional[float] = None,
+        min_heading_speed_mps: float = 0.15,
+    ) -> Dict[str, Any]:
+        """Mise à jour RTK respectant le filtre qualité GGA == 4, âge <= 1,5 s et validité cap > 0,15 m/s."""
+        theta_obs: Optional[float] = None
+        if imu_heading_rad is not None:
+            theta_obs = float(imu_heading_rad)
+        elif heading_deg is not None and float(speed_mps) >= float(min_heading_speed_mps):
+            theta_obs = math.radians(float(heading_deg))
+
+        return self.update_rtk(
+            x_gps=x_gps,
+            z_gps=z_gps,
+            theta_dual_ant_rad=theta_obs,
+            rtk_fix=(int(gga_quality) == 4),
+            age_s=age_s,
+            gga_quality=int(gga_quality),
+            num_satellites=num_satellites,
+            hdop=hdop,
+        )
+
+    def update_from_nmea(
+        self,
+        sentence: str,
+        enu_frame: Any,
+        imu_heading_rad: Optional[float] = None,
+        now_monotonic: Optional[float] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Décode une trame NMEA 0183 ($GNGGA/$GNRMC/$GNVTG), projette en ENU local et met à jour l'EKF."""
+        try:
+            from backend.hardware.gps_rtk_reader import parse_nmea_sentence
+        except ImportError:
+            from gps_rtk_reader import parse_nmea_sentence  # type: ignore
+
+        pos = parse_nmea_sentence(sentence, current=self._last_nmea_pos, now_monotonic=now_monotonic)
+        if pos is None:
+            return None
+        self._last_nmea_pos = pos
+        x_east, y_north = enu_frame.to_xy(pos.lat, pos.lon)
+        age = 0.0 if now_monotonic is not None else pos.age_s
+        return self.update_rtk_gga(
+            x_gps=x_east,
+            z_gps=y_north,
+            gga_quality=pos.quality,
+            age_s=age,
+            heading_deg=pos.heading_deg,
+            speed_mps=pos.speed_mps,
+            num_satellites=pos.num_satellites,
+            hdop=pos.hdop,
+            imu_heading_rad=imu_heading_rad,
+        )
+
+    @staticmethod
+    def compute_stanley_rtk_command(
+        e_lat_m: float,
+        delta_cap_deg: float,
+        v_mps: float = 0.12,
+        k_cap: float = 0.8,
+        k_lat: float = 40.0,
+        k_e: float = 2.0,
+        direction_max: int = 35,
+        dist_remaining_m: Optional[float] = None,
+        v_cmd_nominal: int = 20,
+    ) -> Dict[str, Any]:
+        """Loi de commande Stanley en pourcentage de direction (architecture_integration_GPS_RTK_vision.docx) :
+        d = clip(round(k_cap * delta_cap - k_lat * atan(k_e * e_lat / v) / (pi / 2)), -35, +35).
+        Ralentissement à < 1,0 m de la fin de segment, arrêt à <= 0,30 m.
+        """
+        v_eff = max(0.10, float(v_mps))
+        raw_d = float(k_cap) * float(delta_cap_deg) - float(k_lat) * math.atan(float(k_e) * float(e_lat_m) / v_eff) / (
+            math.pi / 2.0
+        )
+        d_cmd = int(max(-int(direction_max), min(int(direction_max), round(raw_d))))
+
+        arrived = False
+        a_cmd = int(v_cmd_nominal)
+        if dist_remaining_m is not None:
+            if float(dist_remaining_m) <= 0.30:
+                arrived = True
+                a_cmd = 0
+                d_cmd = 0
+            elif float(dist_remaining_m) <= 1.0:
+                a_cmd = max(15, int(v_cmd_nominal) // 2)
+
+        return {
+            "a": a_cmd,
+            "d": d_cmd,
+            "raw_d": round(raw_d, 2),
+            "arrived": arrived,
+            "cmd_str": f"DRIVE:{a_cmd},{d_cmd}:600" if not arrived else "STOP",
+        }
 
     def update_vision(
         self,
@@ -1040,6 +1189,16 @@ class RtkImuEkfLocalizer:
             "omega_rad_s": round(float(self.x_state[4]), 5),
             "localization_mode": self.localization_mode,
             "rtk_available": self.rtk_available,
+            "gga_quality": self.gga_quality,
+            "gga_quality_label": self.gga_quality_label,
+            "num_satellites": self.num_satellites,
+            "hdop": round(self.hdop, 2),
+            "gps_age_s": round(self.gps_age_s, 3),
+            "gps_module": self.gps_module,
+            "imu_model": self.imu_model,
+            "rtk_baudrate": self.rtk_baudrate,
+            "rtcm3_source": self.rtcm3_source,
+            "heading_source": self.heading_source,
             "pos_std_m": round(pos_std_m, 4),
             "innovation_norm": round(self.last_innovation_norm, 4),
         }
