@@ -12,7 +12,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-APP_DIR="$REPO_ROOT/APP_Mobile"
+APP_DIR="$REPO_ROOT/robot_uc"
 SERVICE_NAME="robot-agricole"
 USER_NAME="${SUDO_USER:-$(whoami)}"
 BRANCH="${GIT_DEPLOY_BRANCH:-main}"
