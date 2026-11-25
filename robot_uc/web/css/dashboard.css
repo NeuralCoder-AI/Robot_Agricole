@@ -602,7 +602,7 @@ header {
 }
 
 /* ==========================================================================
-   MODULE MATÉRIEL & COCKPIT ZÉRO SIMULATION (ESP32 + CAMÉRA 170°)
+   MODULE MATÉRIEL & COCKPIT ZÉRO SIMULATION (ESP32 + CAMÉRA USB 78°)
    ========================================================================== */
 .status-led {
     width: 8px;

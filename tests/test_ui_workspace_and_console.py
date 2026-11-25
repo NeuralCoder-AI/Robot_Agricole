@@ -84,3 +84,70 @@ def test_threejs_init_and_resize_observer():
     assert "THREE.AmbientLight" in html, "Une lumière ambiante AmbientLight doit être ajoutée pour éviter l'écran noir"
     assert "ResizeObserver" in html, "Un ResizeObserver doit être installé sur le conteneur du canvas 3D"
     assert "window.onWindowResize = onWindowResize;" in html, "onWindowResize doit être exposé sur window pour les transitions de vue"
+
+
+def test_camera_78deg_labels_and_no_170deg_residuals():
+    """Vérifie la suppression totale des mentions '170°' et l'usage cohérent de Caméra USB (78°) / Caméra T'nB (78°)."""
+    files_to_check = [
+        WEB_DIR / "index.html",
+        WEB_DIR / "mobile.html",
+        WEB_DIR / "js" / "ui" / "wizard_navigator.js",
+        REPO_ROOT / "robot_uc" / "backend" / "vision" / "camera_manager.py",
+        REPO_ROOT / "robot_uc" / "backend" / "vision" / "real_vision_pipeline.py",
+        REPO_ROOT / "robot_uc" / "backend" / "api" / "routes.py",
+        REPO_ROOT / "robot_uc" / "backend" / "navigation" / "robot_controller.py",
+    ]
+    for path in files_to_check:
+        content = path.read_text(encoding="utf-8")
+        assert "170°" not in content, f"Mention résiduelle '170°' trouvée dans {path}"
+
+    index_html = (WEB_DIR / "index.html").read_text(encoding="utf-8")
+    assert "Caméra T'nB (78°)" in index_html
+    assert "Caméra USB (78°)" in index_html
+
+    cam_mgr_src = (REPO_ROOT / "robot_uc" / "backend" / "vision" / "camera_manager.py").read_text(encoding="utf-8")
+    assert "Caméra USB (78°)" in cam_mgr_src
+
+
+def test_real_video_cockpit_readonly_mission_badge_and_main_menu_return(client: TestClient):
+    """Vérifie le cockpit vidéo réel : badge mission en lecture seule, bouton Retour Menu Principal (Mission Lock) et absence de bascule directe."""
+    html = client.get("/").text
+
+    # Anciens boutons de bascule directe supprimés
+    assert "Tester les 4 Missions Vision IA" not in html
+    assert "btnVisModeSeeding" not in html
+    assert "btnVisModeReseeding" not in html
+    assert "btnVisModeWeeding" not in html
+    assert "btnVisModeObstacle" not in html
+    assert "4. Obstacles" not in html
+
+    # Nouveau badge en lecture seule + bouton Retour au Menu Principal (verrouillé pendant mission)
+    assert 'id="realCockpitActiveMissionBadge"' in html
+    assert "Mission active :" in html
+    assert 'id="btnRealCockpitMainMenu"' in html
+    assert "← Retour au Menu Principal" in html
+    assert 'onclick="onMainMenuBtnClick()"' in html
+    assert '"btnRealCockpitMainMenu"' in html  # inclus dans lockIds de setMissionUIState
+
+
+def test_wizard_step3_four_cards_with_manual_drive_as_fourth():
+    """Vérifie les 4 cartes exactes du menu principal (Étape 3 du Wizard), avec 4. Conduite Manuelle."""
+    wiz_js = (WEB_DIR / "js" / "ui" / "wizard_navigator.js").read_text(encoding="utf-8")
+
+    expected_cards = [
+        "🌱 1. Semence Initiale",
+        "🔍 2. Révision Semence",
+        "🌿 3. Désherbage IA",
+        "🕹️ 4. Conduite Manuelle",
+    ]
+    positions = []
+    for label in expected_cards:
+        idx = wiz_js.find(label)
+        assert idx != -1, f"Carte '{label}' manquante dans wizard_navigator.js"
+        positions.append(idx)
+
+    # Ordre strict 1 -> 2 -> 3 -> 4 dans le menu principal
+    assert positions == sorted(positions), f"Ordre des 4 cartes incorrect : {positions}"
+    assert "4. Obstacles" not in wiz_js
+    assert "realCockpitActiveMissionBadge" in wiz_js
+

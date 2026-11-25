@@ -117,3 +117,24 @@ def test_safe_reload_guard_blocks_during_mission_and_flushes_after_stop(client: 
     finally:
         server_context.robot.mission_running = prev_running
 
+
+def test_robot_uc_ui_starts_on_wizard_step3_mission_menu():
+    """4. En mode ROBOT_UC, l'UI arrive directement sur le Menu Principal de sélection de mission (Étape 3)
+    et non sur l'espace de travail (Étape 4).
+    """
+    repo_root = Path(__file__).resolve().parent.parent
+    wiz_js = (repo_root / "robot_uc" / "web" / "js" / "ui" / "wizard_navigator.js").read_text(encoding="utf-8")
+    index_html = (repo_root / "robot_uc" / "web" / "index.html").read_text(encoding="utf-8")
+
+    # Extraire le corps de enableRobotUCEmbeddedMode()
+    start = wiz_js.index("enableRobotUCEmbeddedMode() {")
+    end = wiz_js.index("createWizardDOM() {", start)
+    uc_method = wiz_js[start:end]
+
+    assert "this.goToStep(3)" in uc_method, "enableRobotUCEmbeddedMode() doit ouvrir l'Étape 3 (Menu Principal)"
+    assert "selectMissionAndOpenWorkspace" not in uc_method, (
+        "enableRobotUCEmbeddedMode() ne doit plus sauter directement vers l'Étape 4"
+    )
+    assert "window.wizardNav.enableRobotUCEmbeddedMode();" in index_html
+
+

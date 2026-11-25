@@ -117,7 +117,7 @@ async def get_camera_status():
 
 @router.post("/api/camera/connect")
 async def post_camera_connect(payload: Dict[str, Any]):
-    """Connecte la caméra USB 170° et démarre le flux."""
+    """Connecte la Caméra USB (78°) et démarre le flux."""
     dev = payload.get("device_index", payload.get("index", 0))
     w = payload.get("width", 640)
     h = payload.get("height", 480)
@@ -143,7 +143,7 @@ async def post_camera_connect(payload: Dict[str, Any]):
 
 @router.post("/api/camera/disconnect")
 async def post_camera_disconnect():
-    """Déconnecte la caméra USB 170°."""
+    """Déconnecte la Caméra USB (78°)."""
     status = await asyncio.to_thread(camera_manager.disconnect)
     await ws_manager.broadcast({"type": "camera_status", "camera": status})
     return status
@@ -162,7 +162,7 @@ async def post_camera_config(payload: Dict[str, Any]):
 
 @router.get("/api/camera/stream")
 def get_camera_stream():
-    """Stream MJPEG temps réel de la caméra 170° avec HUD vision."""
+    """Stream MJPEG temps réel de la Caméra USB (78°) avec HUD vision."""
     return StreamingResponse(
         camera_manager.generate_mjpeg_stream(),
         media_type="multipart/x-mixed-replace; boundary=frame",

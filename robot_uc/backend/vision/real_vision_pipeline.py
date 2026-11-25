@@ -1,4 +1,4 @@
-"""Pipeline de Vision IA Réelle (OpenCV) pour la Webcam USB Externe (T'nB INCAM1080A / 170°).
+"""Pipeline de Vision IA Réelle (OpenCV) pour la Caméra USB (78°) (T'nB INCAM1080A).
 
 Ce module traite en temps réel les images issues de la caméra réelle branchée en USB (/dev/video2)
 et exécute les 4 algorithmes de vision agricole sans aucune dépendance au moteur 3D :
@@ -40,7 +40,7 @@ class RealVisionPipeline:
         camera_height_m: float = 0.75,
         camera_tilt_deg: float = 35.0,
         k1: float = 0.0,  # 0.0 par défaut pour la T'nB INCAM1080A (optique rectilinéaire sans distorsion fisheye)
-        fov_h_deg: float = 76.0,  # Angle de vue horizontal réel de la T'nB INCAM1080A en 16:9
+        fov_h_deg: float = 78.0,  # Angle de vue horizontal (78°) de la Caméra USB (T'nB INCAM1080A) en 16:9
         yolo_onnx_detector: Optional[YoloOnnxDetector] = None,
     ):
         self.chassis_width_m = chassis_width_m
@@ -256,6 +256,8 @@ class RealVisionPipeline:
             mode = "RESEEDING"
         elif "WEED" in mission_norm:
             mode = "WEEDING"
+        elif "MANUAL" in mission_norm:
+            mode = "MANUAL"
         elif "OBSTACLE" in mission_norm or "MULTI" in mission_norm or "AVOID" in mission_norm:
             mode = "OBSTACLE_AVOIDANCE"
         else:
@@ -320,6 +322,9 @@ class RealVisionPipeline:
             self._process_mission_reseeding(vis, w, h, telemetry)
         elif mode == "WEEDING":
             self._process_mission_weeding(vis, w, h, telemetry)
+        elif mode == "MANUAL":
+            telemetry["recommended_drive"] = {"a": 0, "d": 0, "ms": 250}
+            telemetry["hud_message"] = "CONDUITE MANUELLE — Sécurité Obstacles Active"
         elif mode == "OBSTACLE_AVOIDANCE":
             self._process_mission_obstacle_only(vis, w, h, telemetry)
 
@@ -356,7 +361,10 @@ class RealVisionPipeline:
         else:
             self.consecutive_non_peanut_frames = 0
             telemetry.setdefault("is_valid_peanut_row", True)
-            telemetry.setdefault("hybrid_hud_badge", "🌱 Mode Semis Initial (Suivi Sillon Central)")
+            if mode == "MANUAL":
+                telemetry.setdefault("hybrid_hud_badge", "🕹️ Conduite Manuelle (Sécurité Obstacles Active)")
+            else:
+                telemetry.setdefault("hybrid_hud_badge", "🌱 Mode Semis Initial (Suivi Sillon Central)")
             telemetry.setdefault("hybrid_boundary_alert", False)
             telemetry["consecutive_non_peanut_frames"] = 0
             telemetry["hybrid_line_end_confirmed"] = False
@@ -371,6 +379,8 @@ class RealVisionPipeline:
             )
         elif telemetry.get("hybrid_line_end_confirmed"):
             telemetry["robot_order_str"] = "STOP (FIN DE LIGNE ARACHIDE) | Fraise M6: OFF | Semoir M8: OFF | Dents M5: RELEVÉES"
+        elif mode == "MANUAL":
+            telemetry["robot_order_str"] = "CONDUITE MANUELLE (Opérateur) | Sécurité Obstacles Active"
         elif mode == "SEEDING":
             telemetry["robot_order_str"] = f"DRIVE:{rec['a']},{rec['d']}:{rec.get('ms', 250)} | Semoir M8: ACTIF | Dents M5: RELEVÉES | Fraise M6: OFF"
         elif mode == "RESEEDING":

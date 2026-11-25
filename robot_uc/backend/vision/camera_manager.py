@@ -1,7 +1,7 @@
-"""Gestionnaire de Caméra USB Filaire 170° et Serveur de Streaming MJPEG OpenCV.
+"""Gestionnaire de Caméra USB (78°) et Serveur de Streaming MJPEG OpenCV.
 
 Permet le scan des périphériques vidéo Linux (/dev/video*), l'acquisition temps réel,
-le redressement grand angle 170°, l'annotation par RealVisionPipeline et le streaming MJPEG.
+la correction optique k1 (Caméra USB (78°)), l'annotation par RealVisionPipeline et le streaming MJPEG.
 """
 
 import glob
@@ -21,7 +21,7 @@ logger = logging.getLogger("CameraManager")
 
 
 class CameraManager:
-    """Singleton de gestion de la caméra automobile 170° USB."""
+    """Singleton de gestion de la Caméra USB (78°) (T'nB INCAM1080A)."""
 
     _instance: Optional["CameraManager"] = None
 
@@ -45,7 +45,7 @@ class CameraManager:
         self.yolo_pipeline = YoloVisionPipeline()
         self.pipeline: RealVisionPipeline = self.yolo_pipeline.base_pipeline
         self.pipeline.camera_height_m = 0.75
-        self.pipeline.set_optical_config(k1=self.k1, tilt_deg=self.camera_tilt_deg, fov_h_deg=76.0)
+        self.pipeline.set_optical_config(k1=self.k1, tilt_deg=self.camera_tilt_deg, fov_h_deg=78.0)
 
         self._cap: Optional[cv2.VideoCapture] = None
         self._lock = threading.RLock()
@@ -276,8 +276,8 @@ class CameraManager:
                 self._cap = None
                 self.connected = True
                 self.is_synthetic = True
-                self.active_device_name = "Flux Virtuel 170° (Simulation Agricole Haute Fidélité)"
-                self.last_error = "Aucune caméra matérielle USB n'a répondu — Mode flux synthétique 170° activé"
+                self.active_device_name = "Caméra USB (78°) — Flux Virtuel (Simulation Agricole Haute Fidélité)"
+                self.last_error = "Aucune caméra matérielle USB n'a répondu — Mode flux synthétique Caméra USB (78°) activé"
                 synth = self.pipeline.generate_synthetic_farm_frame(
                     width=self.width, height=self.height, frame_idx=0, mission=self.current_mission
                 )
@@ -285,7 +285,7 @@ class CameraManager:
                 self._last_frame = synth
                 self._last_annotated_frame = annotated
                 self._last_telemetry = telem
-                logger.info("ℹ️ Mode flux caméra synthétique 170° activé pour /dev/video%d", self.device_index)
+                logger.info("ℹ️ Mode flux synthétique Caméra USB (78°) activé pour /dev/video%d", self.device_index)
 
             self._running = True
             self._capture_thread = threading.Thread(

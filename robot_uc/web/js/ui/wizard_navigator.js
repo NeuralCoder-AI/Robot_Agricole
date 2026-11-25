@@ -1,16 +1,16 @@
 /**
- * static/js/ui/wizard_navigator.js — Gestionnaire de navigation fluide par Sous-Fenêtres (Wizard Épuré).
- * Étape 1 : Choix du Mode d'Exécution (Simulation Uniquement vs Simulation Couplée).
+ * web/js/ui/wizard_navigator.js — Gestionnaire de navigation fluide par Sous-Fenêtres (Wizard Épuré).
+ * Étape 1 : Choix du Mode d'Exécution (Simulation Uniquement, Couplé, ou Réel Zéro Simulation).
  * Étape 2 : Connexion Matérielle ESP32-S3 (si mode Couplé sélectionné).
- * Étape 3 : Choix de la Mission (Désherbage, Semence Initiale, Révision de la Semence, Mode Manuel).
- * Étape 4 : Espace de Travail Épuré (Scène 3D + Caméra IA + Panneau unique de la mission choisie).
+ * Étape 3 : Menu Principal — Choix de la Mission (1. Semence Initiale, 2. Révision Semence, 3. Désherbage IA, 4. Conduite Manuelle).
+ * Étape 4 : Espace de Travail Épuré (Cockpit Caméra USB 78° / Scène 3D + Panneau unique de la mission choisie).
  */
 
 export class WizardNavigator {
     constructor(options = {}) {
         this.currentStep = 1; // 1, 2, 3 ou 4 (4 = Workspace)
         this.executionMode = 'SIMULATION_ONLY'; // 'SIMULATION_ONLY' ou 'COUPLED'
-        this.selectedMission = 'weeding'; // 'weeding', 'seeding', 'reseeding', 'manual'
+        this.selectedMission = 'seeding'; // 'seeding', 'reseeding', 'weeding', 'manual'
         this.hwConnected = false;
         this.onMissionChange = options.onMissionChange || null;
         this.onModeChange = options.onModeChange || null;
@@ -36,7 +36,8 @@ export class WizardNavigator {
         this.robotUCMode = true;
         this.executionMode = 'REAL_ZERO_SIM';
         this.createWizardDOM();
-        this.selectMissionAndOpenWorkspace(this.selectedMission || 'seeding');
+        // En mode ROBOT_UC, arriver directement sur le Menu Principal de sélection de mission (Étape 3)
+        this.goToStep(3);
     }
 
     createWizardDOM() {
@@ -99,7 +100,7 @@ export class WizardNavigator {
         if (step === 1) {
             this.overlayEl.style.display = 'flex';
             title.innerHTML = "⚙️ Étape 1 — Choix du Mode d'Exécution";
-            subtitle.innerText = "Sélectionnez votre mode : Simulation 3D, Hybride Couplé ou 100 % Réel Zéro Simulation (Caméra 170°)";
+            subtitle.innerText = "Sélectionnez votre mode : Simulation 3D, Hybride Couplé ou 100 % Réel Zéro Simulation (Caméra USB (78°))";
 
             body.innerHTML = `
                 <div class="wizard-grid-2" style="grid-template-columns: repeat(3, 1fr);">
@@ -173,7 +174,7 @@ export class WizardNavigator {
         } else if (step === 2) {
             this.overlayEl.style.display = 'flex';
             title.innerHTML = "🔌 Étape 2 — Connexion au Robot Physique ESP32-S3";
-            subtitle.innerText = "Connectez votre robot ESP32-S3 maintenant ou passez au Cockpit pour configurer le Robot et la Caméra 170°";
+            subtitle.innerText = "Connectez votre robot ESP32-S3 maintenant ou passez au Cockpit pour configurer le Robot et la Caméra USB (78°)";
 
             body.innerHTML = `
                 <div class="hw-connection-panel">
@@ -282,86 +283,102 @@ export class WizardNavigator {
             };
 
         } else if (step === 3) {
+            const isUC = Boolean(this.robotUCMode || window.isRobotUCMode);
             this.overlayEl.style.display = 'flex';
-            title.innerHTML = "🌾 Étape 3 — Choix du Type de Mission";
-            subtitle.innerText = "Sélectionnez l'opération agricole à exécuter sur la parcelle d'arachide";
+            title.innerHTML = isUC
+                ? "🌾 Menu Principal — Sélection de la Mission (ROBOT_UC)"
+                : "🌾 Étape 3 — Choix du Type de Mission";
+            subtitle.innerText = "Sélectionnez la mission agricole ou la conduite manuelle (détection & évitement d'obstacles IA actifs en permanence)";
+
+            // En mode ROBOT_UC, masquer les pastilles d'étapes 1 et 2 inutiles
+            const dot1 = document.getElementById('wizardDot1');
+            const dot2 = document.getElementById('wizardDot2');
+            if (dot1) dot1.style.display = isUC ? 'none' : '';
+            if (dot2) dot2.style.display = isUC ? 'none' : '';
 
             body.innerHTML = `
                 <div class="wizard-grid-4">
-                    <!-- Mission 1 : Désherbage -->
-                    <div class="wizard-card-option ${this.selectedMission === 'weeding' ? 'active' : ''}" data-mission="weeding">
-                        <div>
-                            <div class="wizard-card-icon">🌿</div>
-                            <div class="wizard-card-title">
-                                <span>Désherbage Intelligent</span>
-                                <span class="wizard-card-tag" style="color:#10b981; border-color:#10b981; background:rgba(16,185,129,0.12);">Fraise M6 + Dents M5</span>
-                            </div>
-                            <div class="wizard-card-desc">
-                                Rangs d'arachide vivants espacés de 46 cm avec présence d'adventices. La fraise M6 et les dents M5 labourent les 2 couloirs inter-rangs sans toucher aux plants.
-                            </div>
-                        </div>
-                        <div style="color: #10b981; font-weight: 700; font-size: 13px;">Ouvrir l'espace désherbage ➔</div>
-                    </div>
-
-                    <!-- Mission 2 : Semence Initiale -->
+                    <!-- Carte 1 : Semence Initiale -->
                     <div class="wizard-card-option ${this.selectedMission === 'seeding' ? 'active' : ''}" data-mission="seeding">
                         <div>
                             <div class="wizard-card-icon">🌱</div>
                             <div class="wizard-card-title">
-                                <span>Semence Initiale</span>
-                                <span class="wizard-card-tag" style="color:#00e5ff; border-color:#00e5ff; background:rgba(0,229,255,0.12);">Champ 100% Vierge</span>
+                                <span>🌱 1. Semence Initiale</span>
+                                <span class="wizard-card-tag" style="color:#00e5ff; border-color:#00e5ff; background:rgba(0,229,255,0.12);">Semoir M8 • 46 cm</span>
                             </div>
                             <div class="wizard-card-desc">
-                                Parcelle de terre 100 % vide. Les 2 tuyaux de semence arrière M8 (-23 cm et +23 cm) déposent 2 rangées simultanées écartées de 46 cm avec pas latéral de 92 cm.
+                                Parcelle de terre vierge. Les 2 tuyaux de semence arrière M8 (-23 cm et +23 cm) déposent 2 rangées simultanées écartées de 46 cm avec évitement d'obstacles actif.
                             </div>
                         </div>
-                        <div style="color: #00e5ff; font-weight: 700; font-size: 13px;">Ouvrir l'espace semence ➔</div>
+                        <div style="color: #00e5ff; font-weight: 700; font-size: 13px;">Ouvrir 1. Semence Initiale ➔</div>
                     </div>
 
-                    <!-- Mission 3 : Révision de la Semence -->
+                    <!-- Carte 2 : Révision Semence -->
                     <div class="wizard-card-option ${this.selectedMission === 'reseeding' ? 'active' : ''}" data-mission="reseeding">
                         <div>
                             <div class="wizard-card-icon">🔍</div>
                             <div class="wizard-card-title">
-                                <span>Révision de la Semence</span>
+                                <span>🔍 2. Révision Semence</span>
                                 <span class="wizard-card-tag" style="color:#eab308; border-color:#eab308; background:rgba(234,179,8,0.12);">Resemence Ciblée</span>
                             </div>
                             <div class="wizard-card-desc">
-                                Scan IA par caméra : détection des trous de germination (> 35 cm) et des plants morts. Resemence chirurgicale synchronisée avec les tuyaux arrière M8.
+                                Scan IA par Caméra USB (78°) : détection des manques de germination (> 25 cm) et des plants absents. Resemence chirurgicale synchronisée avec les tuyaux arrière M8.
                             </div>
                         </div>
-                        <div style="color: #eab308; font-weight: 700; font-size: 13px;">Ouvrir l'espace révision ➔</div>
+                        <div style="color: #eab308; font-weight: 700; font-size: 13px;">Ouvrir 2. Révision Semence ➔</div>
                     </div>
 
-                    <!-- Mission 4 : Mode Manuel -->
+                    <!-- Carte 3 : Désherbage IA -->
+                    <div class="wizard-card-option ${this.selectedMission === 'weeding' ? 'active' : ''}" data-mission="weeding">
+                        <div>
+                            <div class="wizard-card-icon">🌿</div>
+                            <div class="wizard-card-title">
+                                <span>🌿 3. Désherbage IA</span>
+                                <span class="wizard-card-tag" style="color:#10b981; border-color:#10b981; background:rgba(16,185,129,0.12);">Fraise M6 + Dents M5</span>
+                            </div>
+                            <div class="wizard-card-desc">
+                                Rangs d'arachide vivants espacés de 46 cm avec présence d'adventices. La fraise M6 et les dents M5 travaillent les couloirs inter-rangs avec protection obstacles permanente.
+                            </div>
+                        </div>
+                        <div style="color: #10b981; font-weight: 700; font-size: 13px;">Ouvrir 3. Désherbage IA ➔</div>
+                    </div>
+
+                    <!-- Carte 4 : Conduite Manuelle -->
                     <div class="wizard-card-option ${this.selectedMission === 'manual' ? 'active' : ''}" data-mission="manual">
                         <div>
                             <div class="wizard-card-icon">🕹️</div>
                             <div class="wizard-card-title">
-                                <span>Mode Manuel & Réglages</span>
-                                <span class="wizard-card-tag" style="color:#94a3b8; border-color:#94a3b8; background:rgba(148,163,184,0.12);">Contrôle Total</span>
+                                <span>🕹️ 4. Conduite Manuelle</span>
+                                <span class="wizard-card-tag" style="color:#94a3b8; border-color:#94a3b8; background:rgba(148,163,184,0.12);">Pilotage Direct</span>
                             </div>
                             <div class="wizard-card-desc">
-                                Pilotage direct des moteurs M1 à M8, déploiement des panneaux solaires M7, vidange de la trémie M8, calibration et sauvegarde NVS.
+                                Pilotage manuel direct des moteurs M1 à M8, déploiement des panneaux solaires M7, vidange M8, calibration NVS et retour vidéo Caméra T'nB (78°) avec détection d'obstacles.
                             </div>
                         </div>
-                        <div style="color: #94a3b8; font-weight: 700; font-size: 13px;">Ouvrir le cockpit manuel ➔</div>
+                        <div style="color: #94a3b8; font-weight: 700; font-size: 13px;">Ouvrir 4. Conduite Manuelle ➔</div>
                     </div>
                 </div>
             `;
 
-            footer.innerHTML = `
-                <button type="button" class="btn-wizard-back" id="btnWizBackToStep2">⬅ Retour</button>
-                <div style="font-size: 12px; color: #94a3b8;">Cliquez sur la mission souhaitée</div>
-            `;
+            if (isUC) {
+                footer.innerHTML = `
+                    <div style="font-size: 12px; color: #6ee7b7; font-weight: 700;">🤖 Mode Embarqué ROBOT_UC — Caméra T'nB (78°) &amp; Sécurité Obstacles Active</div>
+                    <div style="font-size: 12px; color: #94a3b8;">Cliquez sur l'une des 4 cartes pour ouvrir le cockpit</div>
+                `;
+            } else {
+                footer.innerHTML = `
+                    <button type="button" class="btn-wizard-back" id="btnWizBackToStep2">⬅ Retour</button>
+                    <div style="font-size: 12px; color: #94a3b8;">Cliquez sur la mission souhaitée</div>
+                `;
 
-            document.getElementById('btnWizBackToStep2').onclick = () => {
-                if (this.executionMode === 'COUPLED' || this.executionMode === 'REAL_ZERO_SIM') {
-                    this.goToStep(2);
-                } else {
-                    this.goToStep(1);
-                }
-            };
+                document.getElementById('btnWizBackToStep2').onclick = () => {
+                    if (this.executionMode === 'COUPLED' || this.executionMode === 'REAL_ZERO_SIM') {
+                        this.goToStep(2);
+                    } else {
+                        this.goToStep(1);
+                    }
+                };
+            }
 
             const cards = body.querySelectorAll('.wizard-card-option');
             cards.forEach(card => {
@@ -412,16 +429,21 @@ export class WizardNavigator {
     }
 
     applyCleanWorkspaceLayout(missionName) {
-        // 1. Mise à jour du titre de la vue active dans le Header
+        // 1. Mise à jour du titre de la vue active dans le Header & badge lecture seule du cockpit vidéo
+        const titles = {
+            'seeding': '🌱 1. Semence Initiale',
+            'reseeding': '🔍 2. Révision Semence',
+            'weeding': '🌿 3. Désherbage IA',
+            'manual': '🕹️ 4. Conduite Manuelle'
+        };
+        const activeLabel = titles[missionName] || '🌱 1. Semence Initiale';
         const titleEl = document.getElementById('hdrActiveViewTitle');
         if (titleEl) {
-            const titles = {
-                'weeding': '🌿 Désherbage Intelligent',
-                'seeding': '🌱 Semence Initiale',
-                'reseeding': '🔍 Révision de la Semence',
-                'manual': '🕹️ Mode Manuel & Diagnostics'
-            };
-            titleEl.textContent = titles[missionName] || '🌾 Mission Agricole';
+            titleEl.textContent = activeLabel;
+        }
+        const cockpitBadge = document.getElementById('realCockpitActiveMissionBadge');
+        if (cockpitBadge) {
+            cockpitBadge.textContent = `Mission active : ${activeLabel}`;
         }
 
         // 2. Gestion de l'affichage exclusif des panneaux latéraux

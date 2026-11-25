@@ -1,4 +1,4 @@
-"""tests/test_real_zero_sim_mode.py - Tests du Mode Réel (Zéro Simulation), Hardware & Caméra 170°."""
+"""tests/test_real_zero_sim_mode.py - Tests du Mode Réel (Zéro Simulation), Hardware & Caméra USB (78°)."""
 import pytest
 import numpy as np
 from fastapi.testclient import TestClient
@@ -78,7 +78,7 @@ def test_execution_mode_switching(client):
 
 
 def test_real_vision_pipeline_4_missions():
-    """Vérifie le traitement OpenCV 170° pour les 4 missions agricoles."""
+    """Vérifie le traitement OpenCV Caméra USB (78°) pour les modes agricoles & conduite manuelle."""
     pipeline = RealVisionPipeline(
         chassis_width_m=1.21,
         tool_spacing_m=0.46,
@@ -115,13 +115,20 @@ def test_real_vision_pipeline_4_missions():
     assert "tines_m5_lowered" in telem_weeding
     assert "cutter_m6_active" in telem_weeding
 
-    # Mission 4 : OBSTACLE_AVOIDANCE (Couloir 1.21 m + grand angle 170°)
+    # Sécurité Obstacles (Couloir 1.21 m + Caméra USB 78°)
     vis_obs, telem_obs = pipeline.process_frame(test_frame, mission="OBSTACLE_AVOIDANCE")
     assert vis_obs.shape == (480, 640, 3)
     assert telem_obs["mode"] == "OBSTACLE_AVOIDANCE"
     assert "obstacle_in_corridor" in telem_obs
     assert "min_distance_m" in telem_obs
     assert "emergency_stop" in telem_obs
+
+    # Mode 4 : MANUAL (Conduite Manuelle avec sécurité obstacles active)
+    vis_man, telem_man = pipeline.process_frame(test_frame, mission="MANUAL")
+    assert vis_man.shape == (480, 640, 3)
+    assert telem_man["mode"] == "MANUAL"
+    assert "obstacle_in_corridor" in telem_man
+    assert "CONDUITE MANUELLE" in telem_man["robot_order_str"] or "STOP OBSTACLE" in telem_man["robot_order_str"]
 
 
 def test_camera_connect_and_disconnect_no_deadlock(client):
@@ -153,7 +160,7 @@ def test_hardware_ping_endpoint(client):
 
 
 def test_real_zero_sim_arm_and_camera_guidance():
-    """Vérifie la synchronisation d'armement ARM et le guidage caméra 170° en mode REAL_ZERO_SIM."""
+    """Vérifie la synchronisation d'armement ARM et le guidage Caméra USB (78°) en mode REAL_ZERO_SIM."""
     from backend.api import server_context
 
     robot = server_context.robot
@@ -174,7 +181,7 @@ def test_real_zero_sim_arm_and_camera_guidance():
             res_drive = robot.send_command("DRIVE:25,0:400")
             assert res_drive == "OK"
 
-            # Vérifier que _follow_corridor en mode REAL_ZERO_SIM exploite bien la caméra 170°
+            # Vérifier que _follow_corridor en mode REAL_ZERO_SIM exploite bien la Caméra USB (78°)
             ok_corr = robot._follow_corridor(
                 corridor_center_x=0.0,
                 heading_rad=0.0,
@@ -218,8 +225,8 @@ def test_real_zero_sim_vision_only_dry_run_without_esp32():
         assert not res.startswith("ERR:")
         assert any("[VISION IA -> ORDRE ROBOT]" in msg for _, msg in logged_lines)
 
-        # Vérification du pipeline 16:9 (1280x720) rectilinéaire (k1=0.0) pour la T'nB INCAM1080A
-        pipeline = RealVisionPipeline(k1=0.0, fov_h_deg=76.0)
+        # Vérification du pipeline 16:9 (1280x720) rectilinéaire (k1=0.0) pour la T'nB INCAM1080A (78°)
+        pipeline = RealVisionPipeline(k1=0.0, fov_h_deg=78.0)
         hd_frame = pipeline.generate_synthetic_farm_frame(width=1280, height=720, mission="SEEDING")
         vis_hd, telem_hd = pipeline.process_frame(hd_frame, mission="SEEDING")
         assert vis_hd.shape == (720, 1280, 3)

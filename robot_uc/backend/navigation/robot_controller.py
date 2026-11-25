@@ -1596,7 +1596,7 @@ class RobotController:
     ) -> bool:
         """Avance dans le couloir en maintenant M5/M6 centrés (DRIVE rafraîchi en continu, sans à-coups)."""
         if not self._has_live_pose():
-            # Mode Zéro Simulation (100% Réel) piloté par la Caméra Filaire 170° OpenCV OU fallback pas fixes
+            # Mode Zéro Simulation (100% Réel) piloté par la Caméra USB (78°) OpenCV OU fallback pas fixes
             use_real_cam = self.execution_mode == ExecutionMode.REAL_ZERO_SIM.value
             cam_mgr = None
             if use_real_cam:
@@ -1637,7 +1637,7 @@ class RobotController:
                         time.sleep(0.25)
                         continue
 
-                    # Arrêt et contournement prioritaire si obstacle détecté par la caméra 170°
+                    # Arrêt et contournement prioritaire si obstacle détecté par la Caméra USB (78°)
                     if cam_telem.get("obstacle_stop") or cam_telem.get("emergency_stop"):
                         dist_obs = float(cam_telem.get("min_distance_m", cam_telem.get("obstacle_dist_m", 1.2)))
                         bypass_side = int(cam_telem.get("recommended_bypass_side", 1)) or 1
@@ -1703,7 +1703,7 @@ class RobotController:
                     self.wait_for_done([1, 2, 3, 4], timeout=1.2)
                     pct = pct_start + int((step_idx + 1) / fallback_steps * (pct_end - pct_start))
                     hud_str = cam_telem.get("hud_message") or f"écart {lat_cm:+.1f}cm Δθ {ang_deg:+.1f}°"
-                    self._notify_mission_progress(pct, f"{label} [CAM 170°] : {hud_str} | DRIVE:{a_val},{d_val}:400")
+                    self._notify_mission_progress(pct, f"{label} [CAM 78°] : {hud_str} | DRIVE:{a_val},{d_val}:400")
                 else:
                     res = self.vision_brain.process_scene_telemetry(
                         robot_x=self.robot_x, robot_z=self.robot_z, robot_yaw_rad=self.robot_yaw,
