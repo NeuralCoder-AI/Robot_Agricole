@@ -2034,7 +2034,7 @@
                     </div>
 
                     <!-- 2. Parcelle & Sens -->
-                    <div class="prep-card-compact">
+                    <div class="prep-card-compact autonomous-parcel-card autonomous-only-control">
                         <h5>📐 2. Parcelle &amp; Sens de Progression</h5>
                         <div class="prep-dir-selector-grid" style="margin-bottom: 6px;">
                             <button type="button" class="prep-dir-btn boundary-btn-fixed active" onclick="setFieldBoundaryMode('FIXED_DIMENSIONS')" style="font-size: 10px; padding: 5px 4px;">📏 Dimensions Fixes (L × l)</button>
@@ -2061,7 +2061,7 @@
                     </div>
 
                     <!-- Bouton Démarrage -->
-                    <button type="button" class="btn-launch-mission-cta" onclick="launchCurrentMission('smart_weeding')">
+                    <button type="button" class="btn-launch-mission-cta autonomous-only-control" onclick="launchCurrentMission('smart_weeding')">
                         🚀 Démarrer la Mission
                     </button>
                 </div>
@@ -2139,7 +2139,7 @@
                         </div>
                     </div>
 
-                    <div class="prep-card-compact">
+                    <div class="prep-card-compact autonomous-parcel-card autonomous-only-control">
                         <h5>📐 2. Parcelle &amp; Sens de Progression</h5>
                         <div class="prep-dir-selector-grid" style="margin-bottom: 6px;">
                             <button type="button" class="prep-dir-btn boundary-btn-fixed active" onclick="setFieldBoundaryMode('FIXED_DIMENSIONS')" style="font-size: 10px; padding: 5px 4px;">📏 Dimensions Fixes (L × l)</button>
@@ -2165,7 +2165,7 @@
                         </div>
                     </div>
 
-                    <button type="button" class="btn-launch-mission-cta" style="background: linear-gradient(135deg, #0284c7, #00e5ff); color:#08101e;" onclick="launchCurrentMission('seeding')">
+                    <button type="button" class="btn-launch-mission-cta autonomous-only-control" style="background: linear-gradient(135deg, #0284c7, #00e5ff); color:#08101e;" onclick="launchCurrentMission('seeding')">
                         🚀 Démarrer la Semence Initiale
                     </button>
                 </div>
@@ -2239,7 +2239,7 @@
                         </div>
                     </div>
 
-                    <div class="prep-card-compact">
+                    <div class="prep-card-compact autonomous-parcel-card autonomous-only-control">
                         <h5>📐 2. Parcelle &amp; Sens de Progression</h5>
                         <div class="prep-dir-selector-grid" style="margin-bottom: 6px;">
                             <button type="button" class="prep-dir-btn boundary-btn-fixed active" onclick="setFieldBoundaryMode('FIXED_DIMENSIONS')" style="font-size: 10px; padding: 5px 4px;">📏 Dimensions Fixes (L × l)</button>
@@ -2265,7 +2265,7 @@
                         </div>
                     </div>
 
-                    <button type="button" class="btn-launch-mission-cta" style="background: linear-gradient(135deg, #d97706, #fbbf24); color:#08101e;" onclick="launchCurrentMission('reseeding')">
+                    <button type="button" class="btn-launch-mission-cta autonomous-only-control" style="background: linear-gradient(135deg, #d97706, #fbbf24); color:#08101e;" onclick="launchCurrentMission('reseeding')">
                         🚀 Démarrer la Révision de la Semence
                     </button>
                 </div>
@@ -2311,20 +2311,21 @@
             </div>
 
             <!-- ============================================================== -->
-            <!-- MISSION 4 : 🕹️ MODE MANUEL LIBRE & CONSOLE SÉRIE               -->
+            <!-- MODE 4 : 🕹️ CONDUITE MANUELLE (TRACTION M1-M4 + OUTILS M5-M8)  -->
             <!-- ============================================================== -->
             <div id="panelManualMission" class="mission-container-panel" style="display: none;">
-                <div class="prep-card-compact">
-                    <h5>🕹️ Pilotage Manuel Libre</h5>
-                    <div class="prep-dpad-compact-grid" style="grid-template-columns: repeat(3, 40px); grid-template-rows: repeat(3, 34px);">
+                <!-- Carte 1 : Pilotage Manuel Traction (M1–M4) -->
+                <div class="prep-card-compact" id="manualTractionCard">
+                    <h5>🕹️ 1. Pilotage Manuel Traction (M1–M4)</h5>
+                    <div class="prep-dpad-compact-grid" style="grid-template-columns: repeat(3, 40px); grid-template-rows: repeat(3, 32px);">
                         <div></div>
-                        <button type="button" class="prep-dpad-btn" onmousedown="manualDriveWithSlider(1, 0)" onmouseup="manualStop()" onmouseleave="manualStop()" ontouchstart="manualDriveWithSlider(1, 0); event.preventDefault();" ontouchend="manualStop()">▲</button>
+                        <button type="button" class="prep-dpad-btn" onmousedown="manualDriveWithSlider(1, 0)" onmouseup="manualStop()" onmouseleave="manualStop()" ontouchstart="manualDriveWithSlider(1, 0); event.preventDefault();" ontouchend="manualStop()" title="Avancer">▲</button>
                         <div></div>
-                        <button type="button" class="prep-dpad-btn" onmousedown="manualDriveWithSlider(0, 1)" onmouseup="manualStop()" onmouseleave="manualStop()" ontouchstart="manualDriveWithSlider(0, 1); event.preventDefault();" ontouchend="manualStop()">◀</button>
-                        <button type="button" class="prep-dpad-btn stop" onclick="manualStop()">■</button>
-                        <button type="button" class="prep-dpad-btn" onmousedown="manualDriveWithSlider(0, -1)" onmouseup="manualStop()" onmouseleave="manualStop()" ontouchstart="manualDriveWithSlider(0, -1); event.preventDefault();" ontouchend="manualStop()">▶</button>
+                        <button type="button" class="prep-dpad-btn" onmousedown="manualDriveWithSlider(0, 1)" onmouseup="manualStop()" onmouseleave="manualStop()" ontouchstart="manualDriveWithSlider(0, 1); event.preventDefault();" ontouchend="manualStop()" title="Gauche">◀</button>
+                        <button type="button" class="prep-dpad-btn stop" onclick="manualStop()" title="Arrêt traction">■</button>
+                        <button type="button" class="prep-dpad-btn" onmousedown="manualDriveWithSlider(0, -1)" onmouseup="manualStop()" onmouseleave="manualStop()" ontouchstart="manualDriveWithSlider(0, -1); event.preventDefault();" ontouchend="manualStop()" title="Droite">▶</button>
                         <div></div>
-                        <button type="button" class="prep-dpad-btn" onmousedown="manualDriveWithSlider(-1, 0)" onmouseup="manualStop()" onmouseleave="manualStop()" ontouchstart="manualDriveWithSlider(-1, 0); event.preventDefault();" ontouchend="manualStop()">▼</button>
+                        <button type="button" class="prep-dpad-btn" onmousedown="manualDriveWithSlider(-1, 0)" onmouseup="manualStop()" onmouseleave="manualStop()" ontouchstart="manualDriveWithSlider(-1, 0); event.preventDefault();" ontouchend="manualStop()" title="Reculer">▼</button>
                         <div></div>
                     </div>
                     <div class="prep-speed-slider-row">
@@ -2334,16 +2335,74 @@
                     </div>
                 </div>
 
-                <!-- Outils Directs -->
-                <div class="active-tools-grid" style="grid-template-columns: repeat(4, 1fr);">
-                    <button type="button" class="active-tool-btn" style="padding:6px 2px; font-size:10px;" onclick="sendWsCommand('M7:60')">☀️ Sol. Out</button>
-                    <button type="button" class="active-tool-btn" style="padding:6px 2px; font-size:10px;" onclick="sendWsCommand('M7:-60')">☀️ Sol. In</button>
-                    <button type="button" class="active-tool-btn" style="padding:6px 2px; font-size:10px;" onclick="sendWsCommand('PULSE:5:50:4000')">↓ Dents</button>
-                    <button type="button" class="active-tool-btn" style="padding:6px 2px; font-size:10px;" onclick="sendWsCommand('PULSE:5:-50:4000')">↑ Dents</button>
-                    <button type="button" class="active-tool-btn" style="padding:6px 2px; font-size:10px;" onclick="sendWsCommand('M6:70')">⚙️ Fraise</button>
-                    <button type="button" class="active-tool-btn" style="padding:6px 2px; font-size:10px;" onclick="sendWsCommand('STOP:6')">⏹ Fraise</button>
-                    <button type="button" class="active-tool-btn" style="padding:6px 2px; font-size:10px;" onclick="sendWsCommand('PULSE:8:60:400')">🌱 Semoir</button>
-                    <button type="button" class="active-tool-btn" style="padding:6px 2px; font-size:10px; background:#7f1d1d; color:#fca5a5;" onclick="sendWsCommand('STOP')">🛑 Stop</button>
+                <!-- Carte 2 : Actionneurs Manuels (M5–M8) -->
+                <div class="prep-card-compact" id="manualActuatorsCard">
+                    <h5>⚙️ 2. Actionneurs Manuels (M5–M8)</h5>
+                    <div class="manual-actuators-list">
+                        <!-- Dents M5 -->
+                        <div class="manual-actuator-group">
+                            <div class="manual-actuator-label">Dents M5</div>
+                            <div class="manual-actuator-btns cols-2">
+                                <button type="button" class="active-tool-btn manual-act-btn" onclick="sendWsCommand('PULSE:5:50:4000')" title="Descendre (PULSE:5:50:4000)">
+                                    <span>⬇ Descendre</span>
+                                    <small>PULSE:5:50:4000</small>
+                                </button>
+                                <button type="button" class="active-tool-btn manual-act-btn" onclick="sendWsCommand('PULSE:5:-50:4000')" title="Relever (PULSE:5:-50:4000)">
+                                    <span>⬆ Relever</span>
+                                    <small>PULSE:5:-50:4000</small>
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Fraise M6 -->
+                        <div class="manual-actuator-group">
+                            <div class="manual-actuator-label">Fraise M6</div>
+                            <div class="manual-actuator-btns cols-2">
+                                <button type="button" class="active-tool-btn manual-act-btn" onclick="sendWsCommand('M6:70')" title="Démarrer (M6:70)">
+                                    <span>⚙️ Démarrer</span>
+                                    <small>M6:70</small>
+                                </button>
+                                <button type="button" class="active-tool-btn manual-act-btn btn-stop-danger" onclick="sendWsCommand('STOP:6')" title="Arrêter (STOP:6)">
+                                    <span>⏹ Arrêter</span>
+                                    <small>STOP:6</small>
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Semoir M8 -->
+                        <div class="manual-actuator-group">
+                            <div class="manual-actuator-label">Semoir M8</div>
+                            <div class="manual-actuator-btns cols-3">
+                                <button type="button" class="active-tool-btn manual-act-btn" onclick="sendWsCommand('PULSE:8:60:400')" title="Impulsion (PULSE:8:60:400)">
+                                    <span>🌱 Impulsion</span>
+                                    <small>PULSE:8:60:400</small>
+                                </button>
+                                <button type="button" class="active-tool-btn manual-act-btn" onclick="sendWsCommand('M8:60')" title="Continu (M8:60)">
+                                    <span>▶ Continu</span>
+                                    <small>M8:60</small>
+                                </button>
+                                <button type="button" class="active-tool-btn manual-act-btn btn-stop-danger" onclick="sendWsCommand('STOP:8')" title="Arrêter (STOP:8)">
+                                    <span>⏹ Arrêter</span>
+                                    <small>STOP:8</small>
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Toiture Solaire M7 -->
+                        <div class="manual-actuator-group">
+                            <div class="manual-actuator-label">Toiture Solaire M7</div>
+                            <div class="manual-actuator-btns cols-2">
+                                <button type="button" class="active-tool-btn manual-act-btn" onclick="sendWsCommand('PULSE:7:60:30000')" title="Déployer (PULSE:7:60:30000)">
+                                    <span>☀️ Déployer</span>
+                                    <small>PULSE:7:60:30000</small>
+                                </button>
+                                <button type="button" class="active-tool-btn manual-act-btn" onclick="sendWsCommand('PULSE:7:-60:30000')" title="Ranger (PULSE:7:-60:30000)">
+                                    <span>🌙 Ranger</span>
+                                    <small>PULSE:7:-60:30000</small>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </div>
             </div> <!-- FIN .mission-top-zone -->

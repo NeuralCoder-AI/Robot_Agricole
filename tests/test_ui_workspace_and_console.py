@@ -151,3 +151,48 @@ def test_wizard_step3_four_cards_with_manual_drive_as_fourth():
     assert "4. Obstacles" not in wiz_js
     assert "realCockpitActiveMissionBadge" in wiz_js
 
+
+def test_manual_drive_mode_hides_autonomous_controls_and_exposes_m5_to_m8(client: TestClient):
+    """Vérifie le panneau Conduite Manuelle : masquage des contrôles autonomes + cartes 1 (Traction M1-M4) et 2 (M5-M8)."""
+    html = client.get("/").text
+    wiz_js = (WEB_DIR / "js" / "ui" / "wizard_navigator.js").read_text(encoding="utf-8")
+
+    # 1. Extraire le bloc HTML #panelManualMission jusqu'à la fin de .mission-top-zone
+    start = html.index('id="panelManualMission"')
+    end = html.index('<!-- FIN .mission-top-zone -->', start)
+    manual_html = html[start:end]
+
+    # Aucun contrôle de mission autonome dans le panneau manuel
+    assert "Parcelle &amp; Sens de Progression" not in manual_html
+    assert "btn-launch-mission-cta" not in manual_html
+
+    # Carte 1 : Pilotage Manuel Traction (M1–M4)
+    assert "🕹️ 1. Pilotage Manuel Traction (M1–M4)" in manual_html
+    assert 'id="speedSliderManual"' in manual_html
+    assert "manualDriveWithSlider(1, 0)" in manual_html
+
+    # Carte 2 : Actionneurs Manuels (M5–M8) avec toutes les commandes exactes
+    assert "⚙️ 2. Actionneurs Manuels (M5–M8)" in manual_html
+    for expected_cmd in [
+        "sendWsCommand('PULSE:5:50:4000')",
+        "sendWsCommand('PULSE:5:-50:4000')",
+        "sendWsCommand('M6:70')",
+        "sendWsCommand('STOP:6')",
+        "sendWsCommand('PULSE:8:60:400')",
+        "sendWsCommand('M8:60')",
+        "sendWsCommand('STOP:8')",
+        "sendWsCommand('PULSE:7:60:30000')",
+        "sendWsCommand('PULSE:7:-60:30000')",
+    ]:
+        assert expected_cmd in manual_html, f"Commande manuelle manquante : {expected_cmd}"
+
+    # 2. Les 3 panneaux autonomes marquent bien leurs contrôles autonomes
+    assert html.count("autonomous-parcel-card autonomous-only-control") == 3
+    assert html.count("btn-launch-mission-cta autonomous-only-control") == 3
+
+    # 3. wizard_navigator.js masque les contrôles autonomes en mode manual et les réaffiche pour les missions autonomes
+    assert "const isManual = (missionName === 'manual');" in wiz_js
+    assert ".autonomous-only-control, .autonomous-parcel-card, .btn-launch-mission-cta" in wiz_js
+    assert "el.style.display = isManual ? 'none' : '';" in wiz_js
+
+

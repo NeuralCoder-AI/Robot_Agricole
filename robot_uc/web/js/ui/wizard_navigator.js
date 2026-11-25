@@ -451,11 +451,18 @@ export class WizardNavigator {
         const panelSeeding = document.getElementById('panelSeedingMission');
         const panelReseeding = document.getElementById('panelReseedingMission');
         const panelManual = document.getElementById('panelManualMission');
+        const isManual = (missionName === 'manual');
 
         if (panelWeeding) panelWeeding.style.display = (missionName === 'weeding') ? 'flex' : 'none';
         if (panelSeeding) panelSeeding.style.display = (missionName === 'seeding') ? 'flex' : 'none';
         if (panelReseeding) panelReseeding.style.display = (missionName === 'reseeding') ? 'flex' : 'none';
-        if (panelManual) panelManual.style.display = (missionName === 'manual') ? 'flex' : 'none';
+        if (panelManual) panelManual.style.display = isManual ? 'flex' : 'none';
+
+        // Masquer les contrôles de mission autonome (Parcelle & Démarrer la Mission) en Conduite Manuelle,
+        // et les réafficher automatiquement dès qu'une des 3 missions autonomes est sélectionnée.
+        document.querySelectorAll('.autonomous-only-control, .autonomous-parcel-card, .btn-launch-mission-cta').forEach(el => {
+            el.style.display = isManual ? 'none' : '';
+        });
 
         // 3. Réinitialiser la vue en ÉTAT A (Préparation) pour la mission active
         if (typeof window.setMissionUIState === 'function') {
