@@ -1198,6 +1198,12 @@
         ⏳ Nouveau commit reçu — Mise à jour mise en attente jusqu'à l'arrêt du robot
     </div>
 
+    <!-- BANNIÈRE D'ALERTE MISSION TEMPS RÉEL (AUCUNE LIGNE DÉTECTÉE / FIN DE PARCELLE / SÉCURITÉ CAMÉRA) -->
+    <div id="missionStatusAlertBanner" style="display: none; position: fixed; top: 58px; left: 50%; transform: translateX(-50%); z-index: 10002; background: linear-gradient(90deg, rgba(153, 27, 27, 0.97), rgba(194, 65, 12, 0.97)); border: 2px solid #fb923c; color: #fff7ed; padding: 12px 22px; border-radius: 12px; font-size: 13.5px; font-weight: 900; box-shadow: 0 14px 36px rgba(0,0,0,0.75); align-items: center; gap: 14px; max-width: 92vw;">
+        <span id="missionStatusAlertText">⚠️ Aucune ligne détectée par le robot — Mission arrêtée</span>
+        <button type="button" onclick="document.getElementById('missionStatusAlertBanner').style.display='none'" style="background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.45); color: #fff; border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 11.5px; font-weight: 800;">✕</button>
+    </div>
+
     <!-- MODAL NATIF <dialog> : ⚙️ PARAMÈTRES & MESURES DYNAMIQUES DU ROBOT (SQLITE / JSON) -->
     <dialog id="dynamicSpecsDialog" closedby="any" aria-labelledby="dynSpecsDialogTitle">
         <div class="specs-dialog-inner" style="max-width: 820px;">
@@ -1423,9 +1429,17 @@
 
                 <!-- COLONNE DROITE : CALIBRATION MATÉRIELLE NVS M1 à M8 -->
                 <div class="specs-group-box">
-                    <div class="specs-group-title">2. Calibration Matérielle NVS du Firmware v2 (8 × BTS7960 : M1 à M8)</div>
+                    <div class="specs-group-title">2. Tests Directs sur Banc &amp; Calibration Logique Déplacement (NVS M1 à M8)</div>
+                    <div style="display:flex; flex-wrap:wrap; gap:6px; margin-bottom:8px; padding:8px; background:#060b14; border:1px solid #1e3a5f; border-radius:8px;">
+                        <button type="button" class="quick-btn" style="color:#34d399; border-color:#059669; font-weight:900; padding:6px 10px;" onclick="sendHwDiagnosticCmd('ARM')">⚡ ARM</button>
+                        <button type="button" class="quick-btn" style="color:#fff; background:#b91c1c; border-color:#ef4444; font-weight:900; padding:6px 10px;" onclick="sendHwDiagnosticCmd('ESTOP')">🛑 ESTOP</button>
+                        <button type="button" class="quick-btn" style="color:#fca5a5; border-color:#dc2626; font-weight:800; padding:6px 10px;" onclick="sendHwDiagnosticCmd('STOP')">■ STOP</button>
+                        <button type="button" class="quick-btn" style="color:#38bdf8; border-color:#0284c7; font-weight:800; padding:6px 10px;" onclick="sendHwDiagnosticCmd('DRIVE:30,0:800')" title="Test ligne droite avant 800 ms">▶ Avance (DRIVE:30,0)</button>
+                        <button type="button" class="quick-btn" style="color:#fbbf24; border-color:#d97706; font-weight:800; padding:6px 10px;" onclick="sendHwDiagnosticCmd('DRIVE:0,30:800')" title="Test pivot droite 800 ms">↻ Droite (DRIVE:0,30)</button>
+                        <button type="button" class="quick-btn" style="color:#6ee7b7; border-color:#10b981; font-weight:700; padding:6px 10px;" onclick="closeHardwareConfigModal(); openDynamicSpecsModal();">📐 Géométrie (robot_config)</button>
+                    </div>
                     <div style="font-size:11px;color:var(--text-dim);">
-                        Réglez l'inversion de sens (<code>INV:n:0/1</code>), les seuils PWM (<code>MIN:n:p</code> / <code>MAX:n:p</code>), la rampe (<code>RAMP:n:r</code> %/s) et la durée max de sécurité (<code>TMAX:n:s</code>), puis cliquez sur <b>💾 Sauvegarder Flash (SAVE)</b>.
+                        Réglez l'inversion de sens (<code>INV:n:0/1</code>), les seuils PWM (<code>MIN:n:p</code> / <code>MAX:n:p</code>), la rampe (<code>RAMP:n:r</code> %/s) et la durée max (<code>TMAX:5</code>, <code>TMAX:7</code>), testez chaque moteur à <b>20%</b>, puis cliquez sur <b>💾 Sauvegarder Flash (SAVE)</b>.
                     </div>
                     <div style="overflow-x:auto;">
                         <table class="nvs-table">
@@ -1505,11 +1519,21 @@
 
                     <div class="spec-field-row" style="flex-direction:column;align-items:stretch;gap:4px;">
                         <div style="display:flex;justify-content:space-between;font-size:11.5px;">
-                            <span>Inclinaison Caméra (Tilt)</span>
-                            <span id="camTiltValDisplay" style="color:var(--accent-cyan);font-family:monospace;">35°</span>
+                            <span>Inclinaison Caméra (<code>camera_pitch_deg</code> : 5°–80°)</span>
+                            <span id="camTiltValDisplay" style="color:var(--accent-cyan);font-family:monospace;">32°</span>
                         </div>
-                        <input type="range" id="camSliderTilt" min="15" max="65" step="1" value="35" oninput="updateCamConfigFromSliders()" style="accent-color:var(--accent-cyan);cursor:pointer;">
+                        <input type="range" id="camSliderTilt" min="5" max="80" step="0.5" value="32" oninput="updateCamConfigFromSliders()" style="accent-color:var(--accent-cyan);cursor:pointer;">
                     </div>
+
+                    <div class="spec-field-row">
+                        <span>Hauteur Caméra au Sol (<code>camera_height_m</code>)</span>
+                        <input type="number" id="camInputHeightM" min="0.20" max="2.50" step="0.01" value="0.90" onchange="updateCamConfigFromSliders()" style="width:85px;background:#0b1324;color:#fff;border:1px solid #263d66;border-radius:5px;padding:3px 6px;font-family:monospace;font-size:11.5px;">
+                    </div>
+
+                    <label style="display:flex;align-items:center;gap:6px;font-size:11.5px;color:#cbd5e1;cursor:pointer;">
+                        <input type="checkbox" id="camChkAutoPitch" checked onchange="updateCamConfigFromSliders()" style="accent-color:#10b981;">
+                        <span>Calcul automatique d'angle (<code>auto_pitch</code>)</span>
+                    </label>
 
                     <div style="display:grid;grid-template-columns:1fr auto;gap:6px;margin-top:10px;">
                         <button type="button" id="btnCamConnectAction" class="btn-send" style="background:linear-gradient(135deg,#0284c7,#0369a1);color:#fff;padding:9px 12px;" onclick="connectRealCamera()">
@@ -6885,12 +6909,30 @@
             } else if (msg.type === "event") {
                 if (msg.event === "HARDWARE_STATUS" && msg.payload) {
                     applyHardwareStatusUI(msg.payload);
+                } else if (msg.event === "MISSION_ALERT" && msg.payload) {
+                    showMissionStatusAlert(msg.payload.level || "error", msg.payload.message || "");
+                    if (typeof logTerminal === "function" && msg.payload.message) {
+                        logTerminal("MISSION", msg.payload.message);
+                    }
+                    if (["NO_LINE_DETECTED", "SYNTHETIC_CAMERA_BLOCKED", "FIELD_END_NO_NEXT_ROW"].includes(msg.payload.code)) {
+                        setMissionUIState("IDLE");
+                    }
+                } else if (msg.event === "MISSION_PROGRESS" && msg.payload) {
+                    if (msg.payload.last_mission_alert && msg.payload.last_mission_alert.ts !== window._lastMissionAlertTs) {
+                        window._lastMissionAlertTs = msg.payload.last_mission_alert.ts;
+                        showMissionStatusAlert(msg.payload.last_mission_alert.level || "warning", msg.payload.last_mission_alert.message || "");
+                    }
+                    if (msg.payload.mission_running === false && window.isMissionRunning) {
+                        setMissionUIState("IDLE");
+                    }
                 }
                 updateStatus(msg.armed, msg.mode, msg.mission);
             } else if (msg.type === "mission_status") {
                 logTerminal("MISSION", `Mission '${msg.mission}' : ${msg.started ? 'Lancée' : 'Échouée'}`);
                 updateStatus(isArmed ? 1 : 0, msg.mode || currentMode, msg.mission);
                 if (msg.started) {
+                    const alertBanner = document.getElementById("missionStatusAlertBanner");
+                    if (alertBanner) alertBanner.style.display = "none";
                     setMissionUIState("RUNNING");
                 } else {
                     setMissionUIState("IDLE");
@@ -6901,6 +6943,30 @@
                 setMissionUIState("IDLE");
             }
         }
+
+        window._lastMissionAlertTs = 0;
+        function showMissionStatusAlert(level, message) {
+            if (!message) return;
+            const banner = document.getElementById("missionStatusAlertBanner");
+            const txt = document.getElementById("missionStatusAlertText");
+            if (!banner || !txt) return;
+            txt.innerText = message;
+            if (level === "success") {
+                banner.style.background = "linear-gradient(90deg, rgba(6, 78, 59, 0.97), rgba(5, 150, 105, 0.97))";
+                banner.style.borderColor = "#34d399";
+                banner.style.color = "#ecfdf5";
+            } else if (level === "warning") {
+                banner.style.background = "linear-gradient(90deg, rgba(146, 64, 14, 0.97), rgba(217, 119, 6, 0.97))";
+                banner.style.borderColor = "#fbbf24";
+                banner.style.color = "#fffbeb";
+            } else {
+                banner.style.background = "linear-gradient(90deg, rgba(153, 27, 27, 0.97), rgba(194, 65, 12, 0.97))";
+                banner.style.borderColor = "#fb923c";
+                banner.style.color = "#fff7ed";
+            }
+            banner.style.display = "flex";
+        }
+        window.showMissionStatusAlert = showMissionStatusAlert;
 
         let currentDetectedIp = "";
         let currentMobileUrl = "";
@@ -7903,7 +7969,8 @@
                     <td><input type="number" id="nvs_max_${m.id}" min="0" max="100" value="${m.max}"></td>
                     <td><input type="number" id="nvs_ramp_${m.id}" min="1" max="1000" value="${m.ramp}"></td>
                     <td><input type="number" id="nvs_tmax_${m.id}" min="0.5" max="3600" step="0.5" value="${m.tmax}"></td>
-                    <td style="display:flex;gap:4px;justify-content:center;">
+                    <td style="display:flex;gap:4px;justify-content:center;flex-wrap:wrap;">
+                        <button type="button" class="quick-btn" style="color:#38bdf8;border-color:#0284c7;font-weight:800;" onclick="sendHwDiagnosticCmd('PULSE:${m.id}:20:1000')" title="Test sécurisé 20% pendant 1 s (après ARM)">▶ 20%</button>
                         <button type="button" class="quick-btn" style="color:#34d399;border-color:#059669;font-weight:800;" onclick="applyMotorNvsRow(${m.id})">Appliquer M${m.id}</button>
                         <button type="button" class="quick-btn" onclick="sendHwDiagnosticCmd('CFG:${m.id}')">CFG:${m.id}</button>
                     </td>
@@ -8082,7 +8149,7 @@
                 if (res.ok) {
                     const hw = await res.json();
                     applyHardwareStatusUI(hw);
-                    if (hw.connected) {
+                    if (hw.connected && !window.isRobotUCMode) {
                         setTimeout(() => {
                             closeHardwareConfigModal();
                         }, 800);
@@ -8368,10 +8435,14 @@
         async function connectRealCamera() {
             const selDev = document.getElementById("camSelectDevice");
             const selRes = document.getElementById("camSelectResolution");
-            const devIndex = (selDev && selDev.value !== "") ? parseInt(selDev.value, 10) : 2;
+            const fallbackDev = window.isRobotUCMode ? 0 : 2;
+            const devIndex = (selDev && selDev.value !== "") ? parseInt(selDev.value, 10) : fallbackDev;
             const resParts = (selRes ? selRes.value : "1280x720").split("x");
             const width = parseInt(resParts[0], 10) || 1280;
             const height = parseInt(resParts[1], 10) || 720;
+            const tiltEl = document.getElementById("camSliderTilt");
+            const heightEl = document.getElementById("camInputHeightM");
+            const autoEl = document.getElementById("camChkAutoPitch");
 
             const btn = document.getElementById("btnCamConnectAction");
             if (btn) {
@@ -8383,7 +8454,15 @@
                 const res = await fetch("/api/camera/connect", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ device_index: devIndex, width: width, height: height, fps: 30 })
+                    body: JSON.stringify({
+                        device_index: devIndex,
+                        width: width,
+                        height: height,
+                        fps: 30,
+                        camera_pitch_deg: tiltEl ? parseFloat(tiltEl.value) : undefined,
+                        camera_height_m: heightEl ? parseFloat(heightEl.value) : undefined,
+                        auto_pitch: autoEl ? Boolean(autoEl.checked) : undefined
+                    })
                 });
                 if (res.ok) {
                     const cam = await res.json();
@@ -8414,14 +8493,31 @@
         function updateCamConfigFromSliders() {
             const k1El = document.getElementById("camSliderK1");
             const k1 = (k1El && k1El.value !== "") ? parseFloat(k1El.value) : 0.0;
-            const tilt = parseFloat(document.getElementById("camSliderTilt").value) || 35;
+            const tiltEl = document.getElementById("camSliderTilt");
+            const tilt = tiltEl ? (parseFloat(tiltEl.value) || 32.0) : 32.0;
+            const heightEl = document.getElementById("camInputHeightM");
+            const heightM = heightEl ? (parseFloat(heightEl.value) || 0.90) : 0.90;
+            const autoEl = document.getElementById("camChkAutoPitch");
+            const autoPitch = autoEl ? Boolean(autoEl.checked) : true;
             document.getElementById("camK1ValDisplay").innerText = k1.toFixed(2);
-            document.getElementById("camTiltValDisplay").innerText = `${Math.round(tilt)}°`;
+            document.getElementById("camTiltValDisplay").innerText = `${tilt.toFixed(1)}°`;
+
+            fetch("/api/config/specs", {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ camera_pitch_deg: tilt, camera_height_m: heightM, auto_pitch: autoPitch })
+            }).catch(e => console.warn("Erreur config/specs:", e));
 
             fetch("/api/camera/config", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ k1: k1, camera_tilt_deg: tilt })
+                body: JSON.stringify({
+                    k1: k1,
+                    camera_tilt_deg: tilt,
+                    camera_pitch_deg: tilt,
+                    camera_height_m: heightM,
+                    auto_pitch: autoPitch
+                })
             }).catch(e => console.warn("Erreur camera/config:", e));
         }
 
@@ -8469,8 +8565,13 @@
                     latErr.innerText = `${cam.telemetry.lateral_error_cm.toFixed(1)} cm`;
                 }
                 const pitchEl = document.getElementById("hudAutoPitchDisplay");
-                if (pitchEl && typeof cam.telemetry.auto_pitch_deg === "number") {
-                    pitchEl.innerText = `📐 Angle Caméra Auto : ${cam.telemetry.auto_pitch_deg.toFixed(1)}°`;
+                if (pitchEl) {
+                    if (cam.telemetry.hud_pitch_label) {
+                        pitchEl.innerText = cam.telemetry.hud_pitch_label;
+                    } else if (typeof cam.telemetry.auto_pitch_deg === "number") {
+                        const modeLbl = (cam.telemetry.auto_pitch === false) ? "Manuel" : "Auto";
+                        pitchEl.innerText = `📐 Angle Caméra ${modeLbl} : ${cam.telemetry.auto_pitch_deg.toFixed(1)}°`;
+                    }
                 }
                 const waitBanner = document.getElementById("hudMovingObstacleWaitBanner");
                 if (waitBanner) {
@@ -8483,7 +8584,8 @@
                 }
                 const guideStat = document.getElementById("hudGuidelineStatus");
                 if (guideStat && cam.telemetry.guideline_detected !== undefined) {
-                    guideStat.innerText = cam.telemetry.guideline_detected ? "Détectée (Verrouillée)" : "Recherche / Axe 0.0";
+                    guideStat.innerText = cam.telemetry.guideline_detected ? "Détectée (Verrouillée)" : "⚠️ Aucune ligne détectée";
+                    guideStat.style.color = cam.telemetry.guideline_detected ? "#34d399" : "#fb923c";
                 }
                 const hybridBadge = document.getElementById("hudHybridBotanicBadge");
                 if (hybridBadge && cam.telemetry.hybrid_hud_badge) {
@@ -8527,11 +8629,11 @@
             if (dump && dump.motor_configs) {
                 Object.keys(dump.motor_configs).forEach((mKey) => {
                     const cfgStr = String(dump.motor_configs[mKey] || "");
-                    const mInv = cfgStr.match(/INV:(\d+)/i);
-                    const mMin = cfgStr.match(/MIN:(\d+)/i);
-                    const mMax = cfgStr.match(/MAX:(\d+)/i);
-                    const mRamp = cfgStr.match(/RAMP:(\d+)/i);
-                    const mTmax = cfgStr.match(/TMAX:([\d.]+)/i);
+                    const mInv = cfgStr.match(/INV[:=](\d+)/i);
+                    const mMin = cfgStr.match(/MIN[:=](\d+)/i);
+                    const mMax = cfgStr.match(/MAX[:=](\d+)/i);
+                    const mRamp = cfgStr.match(/RAMP[:=](\d+)/i);
+                    const mTmax = cfgStr.match(/TMAX[:=]([\d.]+)/i);
                     if (mInv && document.getElementById(`nvs_inv_${mKey}`)) document.getElementById(`nvs_inv_${mKey}`).value = mInv[1];
                     if (mMin && document.getElementById(`nvs_min_${mKey}`)) document.getElementById(`nvs_min_${mKey}`).value = mMin[1];
                     if (mMax && document.getElementById(`nvs_max_${mKey}`)) document.getElementById(`nvs_max_${mKey}`).value = mMax[1];
@@ -8540,6 +8642,10 @@
                 });
             }
         }
+        window.openHardwareConfigModal = openHardwareConfigModal;
+        window.openDynamicSpecsModal = openDynamicSpecsModal;
+        window.applyCameraStatusUI = applyCameraStatusUI;
+        window.applyHardwareStatusUI = applyHardwareStatusUI;
 
         async function readAllHardwareConfigs() {
             if (ws && ws.readyState === WebSocket.OPEN) {
@@ -8631,7 +8737,7 @@
             }
             if (!isUC) return;
 
-            // Mode Embarqué Pur ROBOT_UC : zéro simulation 3D, ouverture directe sur le Menu Principal de Mission (Étape 3)
+            // Mode Embarqué Pur ROBOT_UC : zéro simulation 3D, parcours guidé 4 étapes (Robot+Calibration -> Caméra -> Missions -> Cockpit)
             executionMode = "REAL_ZERO_SIM";
             const btnSim = document.getElementById("btnModeSimOnly");
             const btnCoup = document.getElementById("btnModeCoupled");
@@ -8656,7 +8762,7 @@
             updateRealCockpitMissionBadge((window.wizardNav && window.wizardNav.selectedMission) || "seeding");
 
             if (window.wizardNav && typeof window.wizardNav.enableRobotUCEmbeddedMode === "function") {
-                // Affiche immédiatement le Menu Principal de Sélection de Mission (Étape 3 du Wizard)
+                // Ouvre le parcours guidé 4 étapes ROBOT_UC dès l'Étape 1 (Connexion ESP32 + Calibration Moteurs)
                 window.wizardNav.enableRobotUCEmbeddedMode();
             }
         }

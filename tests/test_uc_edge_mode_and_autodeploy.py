@@ -118,9 +118,10 @@ def test_safe_reload_guard_blocks_during_mission_and_flushes_after_stop(client: 
         server_context.robot.mission_running = prev_running
 
 
-def test_robot_uc_ui_starts_on_wizard_step3_mission_menu():
-    """4. En mode ROBOT_UC, l'UI arrive directement sur le Menu Principal de sélection de mission (Étape 3)
-    et non sur l'espace de travail (Étape 4).
+def test_robot_uc_ui_starts_on_wizard_step1_four_step_flow():
+    """4. En mode ROBOT_UC, l'UI ouvre le parcours guidé en 4 étapes dès l'Étape 1
+    (Connexion Robot + Calibration Moteurs -> Réglage Angle Caméra -> Menu Missions -> Cockpit)
+    sans sauter les étapes matérielles ni charger Three.js.
     """
     repo_root = Path(__file__).resolve().parent.parent
     wiz_js = (repo_root / "robot_uc" / "web" / "js" / "ui" / "wizard_navigator.js").read_text(encoding="utf-8")
@@ -131,10 +132,18 @@ def test_robot_uc_ui_starts_on_wizard_step3_mission_menu():
     end = wiz_js.index("createWizardDOM() {", start)
     uc_method = wiz_js[start:end]
 
-    assert "this.goToStep(3)" in uc_method, "enableRobotUCEmbeddedMode() doit ouvrir l'Étape 3 (Menu Principal)"
+    assert "this.goToStep(1)" in uc_method, "enableRobotUCEmbeddedMode() doit ouvrir l'Étape 1 (Connexion Robot & Calibration)"
     assert "selectMissionAndOpenWorkspace" not in uc_method, (
-        "enableRobotUCEmbeddedMode() ne doit plus sauter directement vers l'Étape 4"
+        "enableRobotUCEmbeddedMode() ne doit pas sauter directement vers l'Étape 4"
     )
+    assert "_renderUCStep1RobotConnection" in wiz_js
+    assert "_renderUCStep2CameraCalibration" in wiz_js
+    assert "btnWizUcOpenCalibration" in wiz_js
+    assert "btnWizUcNextCamera" in wiz_js
+    assert "btnWizUcVisionDryRun" in wiz_js
+    assert "btnWizUcSaveNextMission" in wiz_js
+    assert "btnWizUcBackToCamera" in wiz_js
+    assert "btnWizUcBackToRobot" in wiz_js
     assert "window.wizardNav.enableRobotUCEmbeddedMode();" in index_html
 
 

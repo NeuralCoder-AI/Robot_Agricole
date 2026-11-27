@@ -14,6 +14,7 @@ from typing import Any, Dict, Generator, List, Optional
 import cv2
 import numpy as np
 
+from backend.config.robot_config import is_robot_uc_mode, robot_config
 from backend.vision.real_vision_pipeline import RealVisionPipeline
 from backend.vision.yolo_pipeline import YoloVisionPipeline
 
@@ -27,14 +28,29 @@ class CameraManager:
 
     def __init__(self):
         devices = self.scan_camera_devices()
-        default_dev = devices[0] if devices else {"index": 2, "path": "/dev/video2", "name": "Caméra Externe USB (T'nB INCAM1080A) (/dev/video2)"}
-        self.device_index: int = int(default_dev.get("index", 2))
+        fallback_idx = 0 if is_robot_uc_mode() else 2
+        default_dev = (
+            devices[0]
+            if devices
+            else {
+                "index": fallback_idx,
+                "path": f"/dev/video{fallback_idx}",
+                "name": f"Caméra Externe USB (T'nB INCAM1080A) (/dev/video{fallback_idx})",
+            }
+        )
+        self.device_index: int = int(default_dev.get("index", fallback_idx))
         self.device_path: str = str(default_dev.get("path", f"/dev/video{self.device_index}"))
         self.width: int = 1280
         self.height: int = 720
         self.fps: int = 30
         self.k1: float = 0.0
-        self.camera_tilt_deg: float = 35.0
+
+        # Source unique de vérité : lire angle, hauteur, FOV et auto_pitch depuis robot_config
+        specs = robot_config.get_specs()
+        self.camera_tilt_deg: float = float(specs.get("camera_pitch_deg", 32.0))
+        self.camera_height_m: float = float(specs.get("camera_height_m", 0.90))
+        self.camera_fov_deg: float = float(specs.get("camera_fov_deg", 78.0))
+        self.auto_pitch: bool = bool(specs.get("auto_pitch", True))
         self.current_mission: str = "SEEDING"
 
         self.connected: bool = False
@@ -44,8 +60,13 @@ class CameraManager:
 
         self.yolo_pipeline = YoloVisionPipeline()
         self.pipeline: RealVisionPipeline = self.yolo_pipeline.base_pipeline
-        self.pipeline.camera_height_m = 0.75
-        self.pipeline.set_optical_config(k1=self.k1, tilt_deg=self.camera_tilt_deg, fov_h_deg=78.0)
+        self.pipeline.set_optical_config(
+            k1=self.k1,
+            tilt_deg=self.camera_tilt_deg,
+            fov_h_deg=self.camera_fov_deg,
+            camera_height_m=self.camera_height_m,
+            auto_pitch=self.auto_pitch,
+        )
 
         self._cap: Optional[cv2.VideoCapture] = None
         self._lock = threading.RLock()
@@ -58,6 +79,26 @@ class CameraManager:
         self._last_logged_order: str = ""
         self._last_logged_order_ts: float = 0.0
         self.on_vision_order_cb: Optional[Any] = None
+        self._syncing_config: bool = False
+
+        # Synchronisation bidirectionnelle immédiate avec robot_config (PUT /api/config/specs)
+        robot_config.register_listener(self._on_robot_config_updated)
+
+    def _on_robot_config_updated(self, specs: Dict[str, Any]) -> None:
+        """Applique immédiatement toute mise à jour issue de `robot_config` sans boucle récursive."""
+        if self._syncing_config:
+            return
+        self.camera_tilt_deg = float(np.clip(float(specs.get("camera_pitch_deg", self.camera_tilt_deg)), 5.0, 80.0))
+        self.camera_height_m = float(np.clip(float(specs.get("camera_height_m", self.camera_height_m)), 0.20, 2.50))
+        self.camera_fov_deg = float(np.clip(float(specs.get("camera_fov_deg", self.camera_fov_deg)), 35.0, 170.0))
+        self.auto_pitch = bool(specs.get("auto_pitch", self.auto_pitch))
+        self.pipeline.set_optical_config(
+            k1=self.k1,
+            tilt_deg=self.camera_tilt_deg,
+            fov_h_deg=self.camera_fov_deg,
+            camera_height_m=self.camera_height_m,
+            auto_pitch=self.auto_pitch,
+        )
 
     @classmethod
     def get_instance(cls) -> "CameraManager":
@@ -106,8 +147,13 @@ class CameraManager:
                 except Exception:
                     pass
 
+            uc_mode = is_robot_uc_mode()
             is_integrated = ("integrated" in dev_name.lower()) or ("0bda/5538" in uevent_txt)
-            is_tnb = ("usb camera" in dev_name.lower()) or ("c45/6366" in uevent_txt) or (not is_integrated and idx >= 2)
+            is_tnb = (
+                ("usb camera" in dev_name.lower())
+                or ("c45/6366" in uevent_txt)
+                or (not is_integrated and (uc_mode or idx >= 2))
+            )
 
             if is_integrated:
                 name = f"Webcam Interne PC ({path})"
@@ -130,14 +176,20 @@ class CameraManager:
                 "resolutions": ["1280x720", "1920x1080", "640x480"],
             })
 
-        # Prioriser la webcam USB externe T'nB INCAM1080A (/dev/video2) devant la webcam interne PC (/dev/video0)
-        devices.sort(key=lambda d: (0 if d.get("is_external", True) else 1, d["index"]))
+        # En mode ROBOT_UC (HP t530 sans webcam intégrée), prioriser /dev/video0 par défaut.
+        # En mode DEV_FULL (PC portable), prioriser la caméra USB externe devant la webcam interne.
+        if is_robot_uc_mode():
+            devices.sort(key=lambda d: (0 if d["index"] == 0 and d.get("is_external", True) else (1 if d.get("is_external", True) else 2), d["index"]))
+        else:
+            devices.sort(key=lambda d: (0 if d.get("is_external", True) else 1, d["index"]))
 
         if not devices:
+            default_idx = 0 if is_robot_uc_mode() else 2
+            default_path = f"/dev/video{default_idx}"
             devices.append({
-                "index": 2,
-                "path": "/dev/video2",
-                "name": "Caméra Externe USB (T'nB INCAM1080A) (/dev/video2)",
+                "index": default_idx,
+                "path": default_path,
+                "name": f"Caméra Externe USB (T'nB INCAM1080A) ({default_path})",
                 "raw_kernel_name": "USB Camera2.0: USB Camera",
                 "is_external": True,
                 "is_tnb_incam1080a": True,
@@ -200,20 +252,23 @@ class CameraManager:
         k1: Optional[float] = None,
         tilt_deg: Optional[float] = None,
         mission: Optional[str] = None,
+        camera_height_m: Optional[float] = None,
+        auto_pitch: Optional[bool] = None,
     ) -> Dict[str, Any]:
-        """Ouvre la caméra USB sélectionnée (T'nB INCAM1080A /dev/video2 par défaut) ou active le fallback synthétique."""
+        """Ouvre la caméra USB sélectionnée (/dev/video0 prioritaire sur ROBOT_UC) ou active le fallback synthétique."""
         # Arrêter proprement un éventuel thread précédent HORS du lock pour éviter tout deadlock
         self.disconnect()
 
         with self._lock:
             scanned = self.scan_camera_devices()
+            fallback_idx = 0 if is_robot_uc_mode() else 2
             if device_index is None or int(device_index) < 0:
-                self.device_index = int(scanned[0]["index"]) if scanned else 2
+                self.device_index = int(scanned[0]["index"]) if scanned else fallback_idx
             else:
                 self.device_index = int(device_index)
             self.device_path = f"/dev/video{self.device_index}"
 
-            # Compatibilité totale : connect(2, 1280, 720, 30) OU connect(2, "1280x720", k1=...)
+            # Compatibilité totale : connect(0, 1280, 720, 30) OU connect(0, "1280x720", k1=...)
             if isinstance(width, str) and resolution is None:
                 resolution = width
                 width = None
@@ -238,11 +293,21 @@ class CameraManager:
             if k1 is not None:
                 self.k1 = float(k1)
             if tilt_deg is not None:
-                self.camera_tilt_deg = float(tilt_deg)
+                self.camera_tilt_deg = float(np.clip(float(tilt_deg), 5.0, 80.0))
+            if camera_height_m is not None:
+                self.camera_height_m = float(np.clip(float(camera_height_m), 0.20, 2.50))
+            if auto_pitch is not None:
+                self.auto_pitch = bool(auto_pitch)
             if mission is not None:
                 self.current_mission = str(mission)
 
-            self.pipeline.set_optical_config(k1=self.k1, tilt_deg=self.camera_tilt_deg)
+            self.pipeline.set_optical_config(
+                k1=self.k1,
+                tilt_deg=self.camera_tilt_deg,
+                fov_h_deg=self.camera_fov_deg,
+                camera_height_m=self.camera_height_m,
+                auto_pitch=self.auto_pitch,
+            )
 
             cap, first_frame = self._try_open_v4l2_device(self.device_index)
 
@@ -322,21 +387,124 @@ class CameraManager:
         tilt_deg: Optional[float] = None,
         mission: Optional[str] = None,
         camera_tilt_deg: Optional[float] = None,
+        camera_pitch_deg: Optional[float] = None,
+        camera_height_m: Optional[float] = None,
+        auto_pitch: Optional[bool] = None,
         current_mission: Optional[str] = None,
+        sync_robot_config: bool = True,
     ) -> Dict[str, Any]:
-        """Modifie les réglages optiques ou la mission active à chaud."""
-        effective_tilt = camera_tilt_deg if camera_tilt_deg is not None else tilt_deg
+        """Modifie les réglages optiques (angle, hauteur, mode auto/manuel) ou la mission active à chaud
+        et les propage vers la source unique de vérité `robot_config` + `YoloVisionPipeline` + `RealVisionPipeline`.
+        """
+        effective_tilt = (
+            camera_pitch_deg
+            if camera_pitch_deg is not None
+            else (camera_tilt_deg if camera_tilt_deg is not None else tilt_deg)
+        )
         effective_mission = current_mission if current_mission is not None else mission
 
         if k1 is not None:
-            self.k1 = float(k1)
+            self.k1 = float(np.clip(float(k1), -0.55, 0.20))
         if effective_tilt is not None:
-            self.camera_tilt_deg = float(effective_tilt)
+            self.camera_tilt_deg = float(np.clip(float(effective_tilt), 5.0, 80.0))
+        if camera_height_m is not None:
+            self.camera_height_m = float(np.clip(float(camera_height_m), 0.20, 2.50))
+        if auto_pitch is not None:
+            self.auto_pitch = bool(auto_pitch)
         if effective_mission is not None:
-            self.current_mission = effective_mission
+            self.current_mission = str(effective_mission)
 
-        self.pipeline.set_optical_config(k1=self.k1, tilt_deg=self.camera_tilt_deg)
+        self.pipeline.set_optical_config(
+            k1=self.k1,
+            tilt_deg=self.camera_tilt_deg,
+            fov_h_deg=self.camera_fov_deg,
+            camera_height_m=self.camera_height_m,
+            auto_pitch=self.auto_pitch,
+        )
+
+        if sync_robot_config:
+            cfg_patch: Dict[str, Any] = {}
+            if effective_tilt is not None:
+                cfg_patch["camera_pitch_deg"] = round(self.camera_tilt_deg, 2)
+            if camera_height_m is not None:
+                cfg_patch["camera_height_m"] = round(self.camera_height_m, 3)
+            if auto_pitch is not None:
+                cfg_patch["auto_pitch"] = bool(self.auto_pitch)
+            if cfg_patch:
+                self._syncing_config = True
+                try:
+                    robot_config.update_specs(cfg_patch)
+                finally:
+                    self._syncing_config = False
+
+        # Recalcul immédiat de la télémétrie si une image est déjà en mémoire
+        with self._lock:
+            if self._last_frame is not None:
+                annotated, telem = self.yolo_pipeline.process_frame(
+                    self._last_frame, mission=self.current_mission
+                )
+                self._last_annotated_frame = annotated
+                self._last_telemetry = telem
+
         return self.get_status()
+
+    def calibrate_pitch(
+        self,
+        mode: str = "vanishing_point",
+        marker_distance_m: float = 1.0,
+        y_marker: Optional[float] = None,
+        camera_height_m: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Calibre automatiquement l'angle caméra (`theta_pitch`) via Point de Fuite (`y_vp`) ou mire au sol (1.00 m)."""
+        with self._lock:
+            frame = self._last_frame.copy() if self._last_frame is not None else None
+
+        if frame is None:
+            frame = self.pipeline.generate_synthetic_farm_frame(
+                width=self.width, height=self.height, frame_idx=0, mission=self.current_mission
+            )
+        h, w = frame.shape[:2]
+        cam_h = float(camera_height_m) if camera_height_m is not None else float(self.camera_height_m)
+        cam_h = float(np.clip(cam_h, 0.20, 2.50))
+
+        mode_norm = str(mode or "vanishing_point").strip().lower()
+        y_vp_used: Optional[float] = None
+        source = mode_norm
+
+        if mode_norm in ("ground_marker", "marker", "mire"):
+            y_m = float(y_marker) if y_marker is not None else float(h * 0.72)
+            computed = self.yolo_pipeline.calibrate_pitch_from_reference_marker(
+                y_marker=y_m,
+                marker_distance_m=max(0.25, float(marker_distance_m)),
+                img_height=h,
+                camera_height_m=cam_h,
+            )
+            source = f"ground_marker_{marker_distance_m:.2f}m"
+        else:
+            y_vp_used, source = self.pipeline.estimate_vanishing_point_from_frame(frame)
+            computed = self.yolo_pipeline.calibrate_pitch_from_vanishing_point(
+                y_vp=float(y_vp_used),
+                img_height=h,
+            )
+
+        computed_clamped = round(float(np.clip(computed, 5.0, 80.0)), 1)
+        status = self.set_config(
+            camera_pitch_deg=computed_clamped,
+            camera_height_m=cam_h,
+            auto_pitch=True,
+            sync_robot_config=True,
+        )
+        return {
+            "ok": True,
+            "mode": mode_norm,
+            "source": source,
+            "camera_pitch_deg": computed_clamped,
+            "camera_height_m": round(cam_h, 3),
+            "auto_pitch": True,
+            "vanishing_point_y": round(float(y_vp_used), 1) if y_vp_used is not None else None,
+            "resolution": f"{w}x{h}",
+            "status": status,
+        }
 
     def _capture_loop(self) -> None:
         """Boucle permanente d'acquisition d'images et d'annotation Vision IA."""
@@ -461,6 +629,10 @@ class CameraManager:
             "fps": self.fps,
             "k1": self.k1,
             "camera_tilt_deg": self.camera_tilt_deg,
+            "camera_pitch_deg": self.camera_tilt_deg,
+            "camera_height_m": self.camera_height_m,
+            "camera_fov_deg": self.camera_fov_deg,
+            "auto_pitch": self.auto_pitch,
             "current_mission": self.current_mission,
             "last_error": self.last_error,
             "onnx_loaded": onnx_loaded,

@@ -37,17 +37,21 @@ class RealVisionPipeline:
         self,
         chassis_width_m: float = 1.21,
         tool_spacing_m: float = 0.46,
-        camera_height_m: float = 0.75,
-        camera_tilt_deg: float = 35.0,
+        camera_height_m: float = 0.90,
+        camera_tilt_deg: float = 32.0,
         k1: float = 0.0,  # 0.0 par défaut pour la T'nB INCAM1080A (optique rectilinéaire sans distorsion fisheye)
         fov_h_deg: float = 78.0,  # Angle de vue horizontal (78°) de la Caméra USB (T'nB INCAM1080A) en 16:9
         yolo_onnx_detector: Optional[YoloOnnxDetector] = None,
+        auto_pitch: bool = True,
     ):
         self.chassis_width_m = chassis_width_m
         self.tool_spacing_m = tool_spacing_m
         self.half_tool_m = tool_spacing_m / 2.0  # 0.23 m (23 cm)
-        self.camera_height_m = camera_height_m
-        self.camera_tilt_deg = camera_tilt_deg
+        self.camera_height_m = float(np.clip(camera_height_m, 0.20, 2.50))
+        self.camera_tilt_deg = float(np.clip(camera_tilt_deg, 5.0, 80.0))
+        self.auto_pitch: bool = bool(auto_pitch)
+        self.auto_pitch_deg: float = round(self.camera_tilt_deg, 2)
+        self.vanishing_point_y: Optional[float] = None
         self.k1 = k1
         self.fov_h_deg = fov_h_deg
 
@@ -71,6 +75,7 @@ class RealVisionPipeline:
         self.yolo_model_name: str = str(self.yolo_onnx_detector.yolo_model_name)
         self.obstacle_tracker = MultiObjectCentroidTracker()
         self.consecutive_non_peanut_frames: int = 0
+        self.consecutive_no_line_frames: int = 0
         self.end_of_row_consecutive_frames: int = 5
 
     def detect_objects_onnx(
@@ -86,14 +91,95 @@ class RealVisionPipeline:
         k1: Optional[float] = None,
         tilt_deg: Optional[float] = None,
         fov_h_deg: Optional[float] = None,
+        camera_height_m: Optional[float] = None,
+        auto_pitch: Optional[bool] = None,
     ) -> None:
         """Met à jour les paramètres optiques de la caméra à chaud."""
         if k1 is not None:
             self.k1 = float(np.clip(k1, -0.55, 0.20))
         if tilt_deg is not None:
-            self.camera_tilt_deg = float(np.clip(tilt_deg, 10.0, 75.0))
+            self.camera_tilt_deg = float(np.clip(tilt_deg, 5.0, 80.0))
         if fov_h_deg is not None:
-            self.fov_h_deg = float(np.clip(fov_h_deg, 45.0, 175.0))
+            self.fov_h_deg = float(np.clip(fov_h_deg, 35.0, 170.0))
+        if camera_height_m is not None:
+            self.camera_height_m = float(np.clip(camera_height_m, 0.20, 2.50))
+        if auto_pitch is not None:
+            self.auto_pitch = bool(auto_pitch)
+        if not self.auto_pitch:
+            self.auto_pitch_deg = round(self.camera_tilt_deg, 2)
+
+    def get_effective_pitch_deg(self, h: int) -> float:
+        """Retourne l'angle d'inclinaison caméra effectif (manuel strict ou auto par point de fuite)."""
+        if not self.auto_pitch:
+            eff = float(np.clip(self.camera_tilt_deg, 5.0, 80.0))
+            self.auto_pitch_deg = round(eff, 2)
+            return eff
+        fov_deg = max(30.0, min(170.0, float(self.fov_h_deg)))
+        fy = (float(h) / 2.0) / math.tan(math.radians(fov_deg / 2.0))
+        cy = float(h) / 2.0
+        y_vp = float(self.vanishing_point_y if self.vanishing_point_y is not None else (h * 0.16))
+        auto_pitch_rad = abs(math.atan((y_vp - cy) / fy))
+        eff = float(np.clip(math.degrees(auto_pitch_rad), 5.0, 80.0))
+        self.auto_pitch_deg = round(eff, 2)
+        return eff
+
+    def estimate_vanishing_point_from_frame(self, frame: np.ndarray) -> Tuple[float, str]:
+        """Estime l'ordonnée `y_vp` du point de fuite à partir des droites convergentes (HoughLinesP)."""
+        if frame is None or frame.size == 0:
+            return 76.8, "horizon_default"
+        h, w = frame.shape[:2]
+        roi_top = int(h * 0.22)
+        roi = frame[roi_top:, :]
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) if roi.ndim == 3 else roi
+        blur = cv2.GaussianBlur(gray, (5, 5), 0)
+        edges = cv2.Canny(blur, 45, 130)
+        lines = cv2.HoughLinesP(
+            edges,
+            rho=1,
+            theta=np.pi / 180.0,
+            threshold=38,
+            minLineLength=max(35, int(h * 0.12)),
+            maxLineGap=20,
+        )
+        left_lines: List[Tuple[float, float]] = []
+        right_lines: List[Tuple[float, float]] = []
+        if lines is not None and lines.size >= 4:
+            for seg in lines.reshape(-1, 4):
+                x1, y1, x2, y2 = float(seg[0]), float(seg[1]), float(seg[2]), float(seg[3])
+                y1 += roi_top
+                y2 += roi_top
+                dx = x2 - x1
+                dy = y2 - y1
+                if abs(dy) < 12.0 or abs(dx) < 4.0:
+                    continue
+                ang = math.degrees(math.atan2(abs(dx), abs(dy)))
+                if ang < 8.0 or ang > 72.0:
+                    continue
+                slope = dx / dy
+                intercept = x1 - slope * y1
+                if slope < 0:
+                    left_lines.append((slope, intercept))
+                else:
+                    right_lines.append((slope, intercept))
+
+        vp_ys: List[float] = []
+        for s1, b1 in left_lines[:12]:
+            for s2, b2 in right_lines[:12]:
+                denom = s1 - s2
+                if abs(denom) < 0.15:
+                    continue
+                y_int = (b2 - b1) / denom
+                if -0.25 * h <= y_int <= 0.48 * h:
+                    vp_ys.append(float(y_int))
+
+        if len(vp_ys) >= 2:
+            y_vp = float(np.median(vp_ys))
+            self.vanishing_point_y = y_vp
+            return y_vp, "vanishing_point_hough"
+
+        y_vp = float(h * 0.16)
+        self.vanishing_point_y = y_vp
+        return y_vp, "horizon_default"
 
     def undistort_170_frame(self, frame: np.ndarray) -> np.ndarray:
         """Applique la correction de distorsion radiale si k1 != 0 (désactivée à k1=0.0 pour T'nB INCAM1080A)."""
@@ -190,17 +276,25 @@ class RealVisionPipeline:
         self, w: int, h: int, offset_x_m: float
     ) -> Tuple[Tuple[int, int], Tuple[int, int]]:
         """Projette une ligne longitudinale du sol (en mètres par rapport au centre du robot) en pixels 2D.
-        Adapté dynamiquement au ratio d'aspect (16:9 en 1280x720 / 1920x1080 ou 4:3 en 640x480) et au FOV réel (~76°).
+        Adapté dynamiquement au ratio d'aspect, au FOV réel (78°), à la hauteur `camera_height_m` et à l'angle `theta_pitch`.
         """
         cx = w / 2.0
-        horizon_y = int(h * 0.32)
+        eff_pitch = self.get_effective_pitch_deg(h)
+        # Horizon dynamique modulé par l'angle d'inclinaison caméra (plus la caméra pique vers le bas, plus l'horizon remonte)
+        horizon_ratio = float(np.clip(0.32 - (eff_pitch - 32.0) * 0.0045, 0.14, 0.50))
+        horizon_y = int(h * horizon_ratio)
         bottom_y = h - 10
 
         aspect = float(w) / max(1.0, float(h))
         fov_scale = 76.0 / max(45.0, float(self.fov_h_deg))
         aspect_comp = (1.333 / aspect) if aspect > 1.4 else 1.0
-        px_per_meter_bottom = (w * 0.56) * fov_scale * aspect_comp
-        px_per_meter_top = (w * 0.17) * fov_scale * aspect_comp
+        height_scale = float(np.clip(0.90 / max(0.25, float(self.camera_height_m)), 0.55, 1.85))
+        pitch_scale = float(
+            np.clip(math.tan(math.radians(eff_pitch)) / math.tan(math.radians(32.0)), 0.55, 1.85)
+        )
+        geom_scale = fov_scale * aspect_comp * math.sqrt(height_scale * pitch_scale)
+        px_per_meter_bottom = (w * 0.56) * geom_scale
+        px_per_meter_top = (w * 0.17) * geom_scale
 
         x_bottom = int(cx + offset_x_m * px_per_meter_bottom)
         x_top = int(cx + offset_x_m * px_per_meter_top)
@@ -215,11 +309,8 @@ class RealVisionPipeline:
         fov_deg = max(30.0, min(170.0, float(self.fov_h_deg)))
         fy = (float(h) / 2.0) / math.tan(math.radians(fov_deg / 2.0))
         cy = float(h) / 2.0
-        # Auto-calibration de l'angle caméra par point de fuite (horizon à ~0.16 * h)
-        y_vp = float(getattr(self, "vanishing_point_y", h * 0.16))
-        auto_pitch_rad = abs(math.atan((y_vp - cy) / fy))
-        self.auto_pitch_deg = round(math.degrees(auto_pitch_rad), 2)
-        theta_rad = auto_pitch_rad if getattr(self, "auto_pitch", True) else math.radians(float(self.camera_tilt_deg))
+        eff_pitch_deg = self.get_effective_pitch_deg(h)
+        theta_rad = math.radians(eff_pitch_deg)
 
         alpha_y = math.atan((float(py) - cy) / fy)
         total_angle = max(math.radians(2.0), min(math.radians(88.0), theta_rad + alpha_y))
@@ -266,23 +357,23 @@ class RealVisionPipeline:
         # 2. Dessin du gabarit physique réel en filigrane (Châssis 1.21 m et outils ±23 cm)
         self._draw_chassis_and_tool_grid(vis, w, h)
 
-        # Auto-calibration de l'angle d'inclinaison caméra (theta_pitch)
-        fov_deg = max(30.0, min(170.0, float(self.fov_h_deg)))
-        fy_init = (float(h) / 2.0) / math.tan(math.radians(fov_deg / 2.0))
-        cy_init = float(h) / 2.0
-        y_vp_init = float(getattr(self, "vanishing_point_y", h * 0.16))
-        self.auto_pitch_deg = round(math.degrees(abs(math.atan((y_vp_init - cy_init) / fy_init))), 2)
+        # Angle d'inclinaison caméra effectif (Auto par Point de Fuite OU Manuel strict)
+        eff_pitch = self.get_effective_pitch_deg(h)
+        pitch_mode_lbl = "Auto" if self.auto_pitch else "Manuel"
 
         telemetry: Dict[str, Any] = {
             "mode": mode,
             "resolution": f"{w}x{h}",
             "aspect_ratio": aspect_str,
             "fov_h_deg": self.fov_h_deg,
-            "auto_pitch_deg": self.auto_pitch_deg,
-            "hud_pitch_label": f"📐 Angle Caméra Auto : {self.auto_pitch_deg:.1f}°",
+            "camera_pitch_deg": round(eff_pitch, 2),
+            "camera_height_m": round(float(self.camera_height_m), 3),
+            "auto_pitch": bool(self.auto_pitch),
+            "auto_pitch_deg": round(eff_pitch, 2),
+            "hud_pitch_label": f"📐 Angle Caméra {pitch_mode_lbl} : {eff_pitch:.1f}°",
             "lateral_error_cm": 0.0,
             "heading_error_deg": 0.0,
-            "is_aligned": True,
+            "is_aligned": False,
             "target_detected": False,
             "guideline_detected": False,
             "row_detected": False,
@@ -302,9 +393,9 @@ class RealVisionPipeline:
             "cutter_m6_active": False,
             "seeder_m8_active": False,
             "recommended_steer": 0,
-            "recommended_drive": {"a": 25, "d": 0, "ms": 250},
+            "recommended_drive": {"a": 0, "d": 0, "ms": 250},
             "recommended_tools": {},
-            "robot_order_str": "DRIVE:25,0:250",
+            "robot_order_str": "STOP (EN ATTENTE LIGNE)",
             "hud_message": "",
             "yolo_onnx_loaded": self.yolo_onnx_loaded,
             "yolo_model_name": self.yolo_model_name,
@@ -315,13 +406,13 @@ class RealVisionPipeline:
         # 3. Détection d'obstacles hybride (YOLOv8n ONNX + OpenCV Sobel/Anomalie Sol)
         self._detect_obstacles_170(vis, w, h, telemetry, raw_frame=rectified)
 
-        # 4. Traitement spécialisé selon la mission
+        # 4. Traitement spécialisé selon la mission (TOUJOURS analyser `rectified` sans overlay HUD !)
         if mode == "SEEDING":
-            self._process_mission_seeding(vis, w, h, telemetry)
+            self._process_mission_seeding(vis, w, h, telemetry, raw_frame=rectified)
         elif mode == "RESEEDING":
-            self._process_mission_reseeding(vis, w, h, telemetry)
+            self._process_mission_reseeding(vis, w, h, telemetry, raw_frame=rectified)
         elif mode == "WEEDING":
-            self._process_mission_weeding(vis, w, h, telemetry)
+            self._process_mission_weeding(vis, w, h, telemetry, raw_frame=rectified)
         elif mode == "MANUAL":
             telemetry["recommended_drive"] = {"a": 0, "d": 0, "ms": 250}
             telemetry["hud_message"] = "CONDUITE MANUELLE — Sécurité Obstacles Active"
@@ -370,8 +461,34 @@ class RealVisionPipeline:
             telemetry["hybrid_line_end_confirmed"] = False
             telemetry["hybrid_line_end_detected"] = False
 
+        # 4-ter. Compteur unifié d'absence de ligne sur 5 frames consécutives (SEEDING, RESEEDING, WEEDING)
+        if mode in ("SEEDING", "RESEEDING", "WEEDING"):
+            if mode == "SEEDING":
+                line_ok_now = bool(telemetry.get("guideline_detected", False))
+            else:
+                line_ok_now = bool(
+                    telemetry.get("row_detected", False) and telemetry.get("is_valid_peanut_row", False)
+                )
+            if line_ok_now:
+                self.consecutive_no_line_frames = 0
+            else:
+                self.consecutive_no_line_frames += 1
+            line_end_5 = bool(self.consecutive_no_line_frames >= self.end_of_row_consecutive_frames)
+            telemetry["consecutive_no_line_frames"] = self.consecutive_no_line_frames
+            telemetry["line_end_confirmed"] = line_end_5
+            if line_end_5 and not telemetry.get("obstacle_stop", False):
+                telemetry["recommended_drive"] = {"a": 0, "d": 0, "ms": 250}
+                telemetry["recommended_tools"] = {"tines_depth": 0.0, "cutter_m6": 0, "seeder_m8": 0}
+                telemetry["cutter_m6_active"] = False
+                telemetry["seeder_m8_active"] = False
+                telemetry["tines_m5_lowered"] = False
+        else:
+            self.consecutive_no_line_frames = 0
+            telemetry["consecutive_no_line_frames"] = 0
+            telemetry["line_end_confirmed"] = False
+
         # 5. Synthèse de l'ordre matériel [VISION IA -> ORDRE ROBOT]
-        rec = telemetry.get("recommended_drive") or {"a": 25, "d": 0, "ms": 250}
+        rec = telemetry.get("recommended_drive") or {"a": 0, "d": 0, "ms": 250}
         if telemetry.get("obstacle_stop"):
             side_lbl = "GAUCHE" if telemetry.get("recommended_bypass_side", 1) > 0 else "DROITE"
             telemetry["robot_order_str"] = (
@@ -381,6 +498,8 @@ class RealVisionPipeline:
             telemetry["robot_order_str"] = "STOP (FIN DE LIGNE ARACHIDE) | Fraise M6: OFF | Semoir M8: OFF | Dents M5: RELEVÉES"
         elif mode == "MANUAL":
             telemetry["robot_order_str"] = "CONDUITE MANUELLE (Opérateur) | Sécurité Obstacles Active"
+        elif mode in ("SEEDING", "RESEEDING", "WEEDING") and not telemetry.get("target_detected", False):
+            telemetry["robot_order_str"] = "STOP (AUCUNE LIGNE DÉTECTÉE) | Fraise M6: OFF | Semoir M8: OFF | Dents M5: RELEVÉES"
         elif mode == "SEEDING":
             telemetry["robot_order_str"] = f"DRIVE:{rec['a']},{rec['d']}:{rec.get('ms', 250)} | Semoir M8: ACTIF | Dents M5: RELEVÉES | Fraise M6: OFF"
         elif mode == "RESEEDING":
@@ -640,13 +759,16 @@ class RealVisionPipeline:
                     f"#{first_obj['track_id']} {first_obj['class_name'].upper()} {f_conf}% | {first_obj['d_sol_m']:.2f}m | {f_state}"
                 )
 
-    def _process_mission_seeding(self, vis: np.ndarray, w: int, h: int, telemetry: Dict[str, Any]) -> None:
+    def _process_mission_seeding(
+        self, vis: np.ndarray, w: int, h: int, telemetry: Dict[str, Any], raw_frame: Optional[np.ndarray] = None
+    ) -> None:
         """Mission 1 (SEEDING) : Détection et suivi haute précision de la ligne directrice tracée au sol
         via Filtre Morphologique Black-Hat + CLAHE + Fenêtres Glissantes Horizontales + Régression de Huber.
         """
+        src = raw_frame if raw_frame is not None else vis
         roi_top = int(h * 0.35)
         roi_bot = int(h * 0.92)
-        roi = vis[roi_top:roi_bot, :]
+        roi = src[roi_top:roi_bot, :]
         roi_h, roi_w = roi.shape[:2]
 
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
@@ -730,21 +852,31 @@ class RealVisionPipeline:
         telemetry["row_detected"] = found_track
         telemetry["lateral_error_cm"] = err_cm
         telemetry["heading_error_deg"] = heading_err_deg
-        telemetry["is_aligned"] = bool(abs(err_cm) < 4.0 and abs(heading_err_deg) < 2.5)
+        telemetry["is_aligned"] = bool(found_track and abs(err_cm) < 4.0 and abs(heading_err_deg) < 2.5)
 
         steer_cmd = 0
         if not telemetry.get("obstacle_stop", False):
-            if telemetry["is_aligned"]:
-                telemetry["recommended_drive"] = {"a": 25, "d": 0, "ms": 250}
-                telemetry["hud_message"] = "SEMIS ACTIF — SILLON CENTRAL VERROUILLÉ (0cm, 0.0°)"
+            if not found_track:
+                telemetry["recommended_steer"] = 0
+                telemetry["recommended_drive"] = {"a": 0, "d": 0, "ms": 250}
+                telemetry["seeder_m8_active"] = False
+                telemetry["recommended_tools"] = {"seeder_m8": 0, "tines_depth": 0.0, "cutter_m6": 0}
+                telemetry["hud_message"] = "⚠️ AUCUNE LIGNE DÉTECTÉE — ARRÊT SÉCURITÉ"
             else:
-                steer_cmd = int(np.clip(-1.35 * heading_err_deg - 0.70 * err_cm, -30, 30))
-                telemetry["recommended_drive"] = {"a": 22, "d": steer_cmd, "ms": 250}
-                telemetry["hud_message"] = f"SUIVI SILLON : Écart {err_cm:+.1f}cm | Cap {heading_err_deg:+.1f}° -> Steer {steer_cmd:+d}"
+                if telemetry["is_aligned"]:
+                    telemetry["recommended_drive"] = {"a": 25, "d": 0, "ms": 250}
+                    telemetry["hud_message"] = "SEMIS ACTIF — SILLON CENTRAL VERROUILLÉ (0cm, 0.0°)"
+                else:
+                    # Convention firmware DRIVE:a,d (L=a+d, R=a-d) : d>0 pivote à DROITE.
+                    # Ligne à droite (err_cm > 0) -> d > 0 (+0.70*err_cm).
+                    # Ligne partant vers haut-droite (slope < 0 -> heading_err_deg < 0) -> d > 0 (-1.35*heading_err_deg).
+                    steer_cmd = int(np.clip(+0.70 * err_cm - 1.35 * heading_err_deg, -30, 30))
+                    telemetry["recommended_drive"] = {"a": 22, "d": steer_cmd, "ms": 250}
+                    telemetry["hud_message"] = f"SUIVI SILLON : Écart {err_cm:+.1f}cm | Cap {heading_err_deg:+.1f}° -> Steer {steer_cmd:+d}"
 
-            telemetry["recommended_steer"] = steer_cmd
-            telemetry["seeder_m8_active"] = True
-            telemetry["recommended_tools"] = {"seeder_m8": 60, "tines_depth": 0.0}
+                telemetry["recommended_steer"] = steer_cmd
+                telemetry["seeder_m8_active"] = True
+                telemetry["recommended_tools"] = {"seeder_m8": 60, "tines_depth": 0.0}
 
         # Dessin du réticule de centrage
         t_color = (0, 255, 0) if telemetry["is_aligned"] else (0, 165, 255)
@@ -759,11 +891,14 @@ class RealVisionPipeline:
             2,
         )
 
-    def _process_mission_reseeding(self, vis: np.ndarray, w: int, h: int, telemetry: Dict[str, Any]) -> None:
+    def _process_mission_reseeding(
+        self, vis: np.ndarray, w: int, h: int, telemetry: Dict[str, Any], raw_frame: Optional[np.ndarray] = None
+    ) -> None:
         """Mission 2 (RESEEDING) : Suivi actif des 2 rangs d'arachide (-23 cm et +23 cm) par segmentation ExG+HSV
         ET détection des trous de germination (> 25 cm) pour déclencher PULSE:8:60:400.
         """
-        mask_green = self._compute_vegetation_mask(vis)
+        src = raw_frame if raw_frame is not None else vis
+        mask_green = self._compute_vegetation_mask(src)
 
         gaps_found = 0
         reseed_trigger = False
@@ -842,23 +977,32 @@ class RealVisionPipeline:
         raw_head_deg = float(np.mean(row_angles)) if found_rows else 0.0
         raw_err_cm = (raw_center_x - cx) * 0.28 * scale_w
         err_cm, heading_err_deg = self._apply_temporal_smoothing(raw_err_cm, raw_head_deg, found_rows)
-        steer_cmd = int(np.clip(-1.3 * heading_err_deg - 0.65 * err_cm, -28, 28)) if not (abs(err_cm) < 3.5 and abs(heading_err_deg) < 2.0) else 0
+        is_aligned = bool(found_rows and abs(err_cm) < 4.0 and abs(heading_err_deg) < 2.5)
+        steer_cmd = (
+            0
+            if (not found_rows or (abs(err_cm) < 3.5 and abs(heading_err_deg) < 2.0))
+            else int(np.clip(+0.65 * err_cm - 1.3 * heading_err_deg, -28, 28))
+        )
 
         telemetry["row_detected"] = found_rows
         telemetry["target_detected"] = found_rows
         telemetry["guideline_detected"] = found_rows
         telemetry["lateral_error_cm"] = err_cm
         telemetry["heading_error_deg"] = heading_err_deg
-        telemetry["is_aligned"] = bool(abs(err_cm) < 4.0 and abs(heading_err_deg) < 2.5)
+        telemetry["is_aligned"] = is_aligned
         telemetry["recommended_steer"] = steer_cmd
-        telemetry["reseed_required"] = reseed_trigger
-        telemetry["reseed_gaps_count"] = gaps_found
-        telemetry["gaps_count"] = gaps_found
-        telemetry["reseed_pulse_triggered"] = reseed_trigger
-        telemetry["seeder_m8_active"] = reseed_trigger
+        telemetry["reseed_required"] = bool(found_rows and reseed_trigger)
+        telemetry["reseed_gaps_count"] = gaps_found if found_rows else 0
+        telemetry["gaps_count"] = gaps_found if found_rows else 0
+        telemetry["reseed_pulse_triggered"] = bool(found_rows and reseed_trigger)
+        telemetry["seeder_m8_active"] = bool(found_rows and reseed_trigger)
 
         if not telemetry.get("obstacle_stop", False):
-            if reseed_trigger:
+            if not found_rows:
+                telemetry["recommended_drive"] = {"a": 0, "d": 0, "ms": 250}
+                telemetry["recommended_tools"] = {"seeder_m8": 0, "tines_depth": 0.0, "cutter_m6": 0}
+                telemetry["hud_message"] = "⚠️ AUCUNE LIGNE D'ARACHIDE DÉTECTÉE — ARRÊT SÉCURITÉ"
+            elif reseed_trigger:
                 telemetry["recommended_drive"] = {"a": 16, "d": steer_cmd, "ms": 250}
                 telemetry["recommended_tools"] = {"seeder_m8": 60, "pulse_seed": True}
                 telemetry["hud_message"] = f"TROU DÉTECTÉ ({gaps_found}) — RESEMIS M8 ACTIF | Steer {steer_cmd:+d}"
@@ -867,12 +1011,15 @@ class RealVisionPipeline:
                 telemetry["recommended_tools"] = {"seeder_m8": 0}
                 telemetry["hud_message"] = f"RANGS D'ARACHIDE SUIVIS (dx:{err_cm:+.1f}cm) — SEMOIR EN VEILLE"
 
-    def _process_mission_weeding(self, vis: np.ndarray, w: int, h: int, telemetry: Dict[str, Any]) -> None:
+    def _process_mission_weeding(
+        self, vis: np.ndarray, w: int, h: int, telemetry: Dict[str, Any], raw_frame: Optional[np.ndarray] = None
+    ) -> None:
         """Mission 3 (WEEDING) : Détection et suivi actif des lignes d'arachide (ExG + HSV + Huber fitLine)
         pour maintenir le rang d'arachide sous le tunnel protégé et guider les dents M5 / fraise M6 (-23cm et +23cm)
         strictement dans les couloirs inter-rangs.
         """
-        mask_green = self._compute_vegetation_mask(vis)
+        src = raw_frame if raw_frame is not None else vis
+        mask_green = self._compute_vegetation_mask(src)
 
         cx = w // 2
         y_top = int(h * 0.36)
@@ -915,8 +1062,8 @@ class RealVisionPipeline:
         # Calcul de l'erreur latérale et angulaire de suivi du rang d'arachide avec lissage EMA
         raw_err_cm = (row_bot_x - cx) * 0.28 * scale_w
         err_cm, heading_err_deg = self._apply_temporal_smoothing(raw_err_cm, row_angle_deg, found_crop_row)
-        is_aligned = bool(abs(err_cm) < 4.0 and abs(heading_err_deg) < 2.5)
-        steer_cmd = 0 if is_aligned else int(np.clip(-1.35 * heading_err_deg - 0.65 * err_cm, -30, 30))
+        is_aligned = bool(found_crop_row and abs(err_cm) < 4.0 and abs(heading_err_deg) < 2.5)
+        steer_cmd = 0 if (not found_crop_row or is_aligned) else int(np.clip(+0.65 * err_cm - 1.35 * heading_err_deg, -30, 30))
 
         telemetry["row_detected"] = found_crop_row
         telemetry["target_detected"] = found_crop_row
@@ -959,12 +1106,16 @@ class RealVisionPipeline:
             cv2.rectangle(vis, (bx, by), (bx + bw, by + bh), (0, 140, 255), 2)
             cv2.putText(vis, "ADVENTICE", (bx, max(72, by - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0, 140, 255), 1)
 
-        telemetry["weeds_detected_count"] = weed_count
-        telemetry["tines_m5_lowered"] = bool(weed_count > 0)
-        telemetry["cutter_m6_active"] = bool(weed_count > 0)
+        telemetry["weeds_detected_count"] = weed_count if found_crop_row else 0
+        telemetry["tines_m5_lowered"] = bool(found_crop_row and weed_count > 0)
+        telemetry["cutter_m6_active"] = bool(found_crop_row and weed_count > 0)
 
         if not telemetry.get("obstacle_stop", False):
-            if weed_count > 0:
+            if not found_crop_row:
+                telemetry["recommended_drive"] = {"a": 0, "d": 0, "ms": 250}
+                telemetry["recommended_tools"] = {"tines_depth": 0.0, "cutter_m6": 0, "seeder_m8": 0}
+                telemetry["hud_message"] = "⚠️ AUCUN RANG D'ARACHIDE DÉTECTÉ — ARRÊT SÉCURITÉ"
+            elif weed_count > 0:
                 telemetry["recommended_drive"] = {"a": 22, "d": steer_cmd, "ms": 250}
                 telemetry["recommended_tools"] = {"tines_depth": 1.0, "cutter_m6": 70}
                 telemetry["hud_message"] = (
@@ -1152,10 +1303,11 @@ class RealVisionPipeline:
         aspect = telemetry.get("aspect_ratio", "16:9")
         order_str = telemetry.get("robot_order_str", "DRIVE:25,0:250")
 
-        pitch_auto = telemetry.get("auto_pitch_deg", getattr(self, "auto_pitch_deg", 32.0))
+        pitch_val = telemetry.get("camera_pitch_deg", telemetry.get("auto_pitch_deg", getattr(self, "auto_pitch_deg", 32.0)))
+        pitch_tag = "Auto" if telemetry.get("auto_pitch", self.auto_pitch) else "Manuel"
         badge_color = (0, 220, 100) if not telemetry.get("obstacle_stop", False) else (0, 0, 255)
         cv2.putText(vis, f"CAM T'nB [{mode_str}] ({w}x{h} {aspect})", (12, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 255, 255), 2)
-        cv2.putText(vis, f"dx: {err_cm:+.1f}cm | dTheta: {deg:+.1f}deg | Angle Cam Auto: {pitch_auto:.1f}deg", (305, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (200, 230, 255), 1)
+        cv2.putText(vis, f"dx: {err_cm:+.1f}cm | dTheta: {deg:+.1f}deg | Angle Cam {pitch_tag}: {pitch_val:.1f}deg", (305, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (200, 230, 255), 1)
 
         if msg:
             text_size = cv2.getTextSize(msg, cv2.FONT_HERSHEY_SIMPLEX, 0.44, 1)[0]

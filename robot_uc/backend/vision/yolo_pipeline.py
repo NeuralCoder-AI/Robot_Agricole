@@ -94,6 +94,7 @@ class YoloVisionPipeline:
             k1=0.0,
             fov_h_deg=float(specs.get("camera_fov_deg", 78.0)),
             yolo_onnx_detector=self.yolo_onnx,
+            auto_pitch=bool(specs.get("auto_pitch", True)),
         )
 
         # État d'auto-calibration de l'angle caméra
@@ -123,15 +124,20 @@ class YoloVisionPipeline:
         self.config.register_listener(self._on_config_updated)
 
     def _on_config_updated(self, specs: Dict[str, Any]) -> None:
-        """Synchronise immédiatement toutes les dimensions avec `robot_config`."""
+        """Synchronise immédiatement toutes les dimensions et paramètres optiques avec `robot_config`."""
         self.base_pipeline.chassis_width_m = float(specs.get("chassis_width_m", 1.21))
         self.base_pipeline.tool_spacing_m = float(specs.get("tool_spacing_m", 0.46))
         self.base_pipeline.half_tool_m = float(specs.get("tool_half_offset_m", 0.23))
-        self.base_pipeline.camera_height_m = float(specs.get("camera_height_m", 0.90))
-        self.base_pipeline.camera_tilt_deg = float(specs.get("camera_pitch_deg", 32.0))
-        self.base_pipeline.fov_h_deg = float(specs.get("camera_fov_deg", 78.0))
-        if not bool(specs.get("auto_pitch", True)):
-            self.calibrated_pitch_deg = float(specs.get("camera_pitch_deg", 32.0))
+        auto_p = bool(specs.get("auto_pitch", True))
+        pitch_v = float(specs.get("camera_pitch_deg", 32.0))
+        self.base_pipeline.set_optical_config(
+            tilt_deg=pitch_v,
+            fov_h_deg=float(specs.get("camera_fov_deg", 78.0)),
+            camera_height_m=float(specs.get("camera_height_m", 0.90)),
+            auto_pitch=auto_p,
+        )
+        if not auto_p:
+            self.calibrated_pitch_deg = round(pitch_v, 2)
 
     # ==========================================================================
     # 3. AUTO-CALIBRATION DE L'ANGLE D'INCLINAISON CAMÉRA & DISTANCE AU SOL
@@ -232,13 +238,14 @@ class YoloVisionPipeline:
         d_sol = cam_h / math.tan(total_angle_rad)
         x_sol = d_sol * ((float(x_center) - cx) / fx)
 
+        pitch_mode_lbl = "Auto" if self.config.auto_pitch else "Manuel"
         return {
             "d_sol_m": round(float(d_sol), 4),
             "x_sol_m": round(float(x_sol), 4),
             "theta_pitch_deg": round(theta_deg, 2),
             "fx": round(fx, 2),
             "fy": round(fy, 2),
-            "hud_pitch_label": f"📐 Angle Caméra Auto : {theta_deg:.1f}°",
+            "hud_pitch_label": f"📐 Angle Caméra {pitch_mode_lbl} : {theta_deg:.1f}°",
         }
 
     # ==========================================================================
@@ -745,11 +752,23 @@ class YoloVisionPipeline:
         telem["yolo_onnx_loaded"] = self.yolo_onnx_loaded
         telem["yolo_model_name"] = self.yolo_model_name
 
-        # 1. Auto-calibration de l'angle caméra si un point de fuite des rangs est estimé
-        y_vp = telem.get("vanishing_point_y", h * 0.16)
-        pitch_deg = self.calibrate_pitch_from_vanishing_point(y_vp=float(y_vp), img_height=h)
+        # 1. Angle caméra effectif : auto-calibration par Point de Fuite OU angle manuel strict (`auto_pitch=False`)
+        if self.config.auto_pitch:
+            y_vp = telem.get("vanishing_point_y")
+            if y_vp is None:
+                y_vp = self.base_pipeline.vanishing_point_y if self.base_pipeline.vanishing_point_y is not None else (h * 0.16)
+            pitch_deg = self.calibrate_pitch_from_vanishing_point(y_vp=float(y_vp), img_height=h)
+            pitch_mode_lbl = "Auto"
+        else:
+            pitch_deg = float(self.config.camera_pitch_deg)
+            self.calibrated_pitch_deg = round(pitch_deg, 2)
+            pitch_mode_lbl = "Manuel"
+
+        telem["camera_pitch_deg"] = round(pitch_deg, 2)
+        telem["camera_height_m"] = round(float(self.config.camera_height_m), 3)
+        telem["auto_pitch"] = bool(self.config.auto_pitch)
         telem["auto_pitch_deg"] = round(pitch_deg, 2)
-        telem["hud_pitch_label"] = f"📐 Angle Caméra Auto : {pitch_deg:.1f}°"
+        telem["hud_pitch_label"] = f"📐 Angle Caméra {pitch_mode_lbl} : {pitch_deg:.1f}°"
 
         # 2. Détections YOLOv8n ONNX + OpenCV fusionnées (ou détections injectées en test)
         raw_dets: List[Dict[str, Any]] = []
@@ -791,7 +810,7 @@ class YoloVisionPipeline:
             )
 
         # 3. Continuité de ligne en bas d'image (pour le mode Fin de Ligne Intelligente)
-        line_present = bool(telem.get("guideline_detected", True))
+        line_present = bool(telem.get("guideline_detected", False))
         line_eval = self.evaluate_smart_line_continuity(
             line_detected_in_bottom=line_present,
             step_distance_m=max(0.0, speed_mps * dt),
@@ -800,13 +819,13 @@ class YoloVisionPipeline:
         telem["line_end_detected"] = line_eval["line_end_detected"]
         telem["line_state"] = line_eval["line_state"]
 
-        # Affichage HUD de l'angle caméra auto-calibré et de la bannière obstacle mobile
+        # Affichage HUD de l'angle caméra (Auto ou Manuel) et de la bannière obstacle mobile
         cv2.putText(
             annotated,
-            f"Angle Camera Auto : {pitch_deg:.1f} deg",
+            f"Angle Camera {pitch_mode_lbl} : {pitch_deg:.1f} deg (H={float(self.config.camera_height_m):.2f}m)",
             (14, h - 14),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.52,
+            0.48,
             (255, 230, 0),
             2,
             cv2.LINE_AA,

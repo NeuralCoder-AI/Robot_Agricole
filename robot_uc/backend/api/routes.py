@@ -117,14 +117,16 @@ async def get_camera_status():
 
 @router.post("/api/camera/connect")
 async def post_camera_connect(payload: Dict[str, Any]):
-    """Connecte la Caméra USB (78°) et démarre le flux."""
-    dev = payload.get("device_index", payload.get("index", 0))
-    w = payload.get("width", 640)
-    h = payload.get("height", 480)
+    """Connecte la Caméra USB (78°) (/dev/video0 prioritaire sur ROBOT_UC) et démarre le flux."""
+    dev = payload.get("device_index", payload.get("index"))
+    w = payload.get("width", 1280 if is_robot_uc_mode() else 640)
+    h = payload.get("height", 720 if is_robot_uc_mode() else 480)
     fps = payload.get("fps", 30)
     resolution = payload.get("resolution")
     k1 = payload.get("k1")
-    tilt = payload.get("camera_tilt_deg", payload.get("tilt_deg", payload.get("tilt")))
+    tilt = payload.get("camera_pitch_deg", payload.get("camera_tilt_deg", payload.get("tilt_deg", payload.get("tilt"))))
+    cam_h = payload.get("camera_height_m")
+    auto_p = payload.get("auto_pitch")
     mission = payload.get("current_mission", payload.get("mission"))
     status = await asyncio.to_thread(
         camera_manager.connect,
@@ -136,6 +138,8 @@ async def post_camera_connect(payload: Dict[str, Any]):
         k1=k1,
         tilt_deg=tilt,
         mission=mission,
+        camera_height_m=cam_h,
+        auto_pitch=auto_p,
     )
     await ws_manager.broadcast({"type": "camera_status", "camera": status})
     return status
@@ -151,13 +155,47 @@ async def post_camera_disconnect():
 
 @router.post("/api/camera/config")
 async def post_camera_config(payload: Dict[str, Any]):
-    """Configure la distorsion k1, l'inclinaison de caméra ou la mission."""
+    """Configure la distorsion k1, l'inclinaison caméra (manuel/auto), la hauteur ou la mission."""
     k1 = payload.get("k1")
-    tilt = payload.get("camera_tilt_deg", payload.get("tilt"))
+    tilt = payload.get("camera_pitch_deg", payload.get("camera_tilt_deg", payload.get("tilt_deg", payload.get("tilt"))))
+    cam_h = payload.get("camera_height_m")
+    auto_p = payload.get("auto_pitch")
     mission = payload.get("current_mission", payload.get("mission"))
-    status = camera_manager.set_config(k1=k1, camera_tilt_deg=tilt, current_mission=mission)
+    status = camera_manager.set_config(
+        k1=k1,
+        camera_tilt_deg=tilt,
+        camera_pitch_deg=payload.get("camera_pitch_deg"),
+        camera_height_m=cam_h,
+        auto_pitch=auto_p,
+        current_mission=mission,
+    )
+    if server_context.robot:
+        server_context.robot.sync_dynamic_config(robot_config.get_specs())
     await ws_manager.broadcast({"type": "camera_status", "camera": status})
     return status
+
+
+@router.post("/api/camera/calibrate-pitch")
+async def post_camera_calibrate_pitch(payload: Optional[Dict[str, Any]] = None):
+    """Déclenche l'auto-calibration de l'angle caméra (Point de Fuite ou Mire au sol 1.00 m)."""
+    body = payload or {}
+    mode = str(body.get("mode", "vanishing_point"))
+    marker_distance_m = float(body.get("marker_distance_m", 1.0))
+    y_marker = body.get("y_marker")
+    cam_h = body.get("camera_height_m")
+    res = await asyncio.to_thread(
+        camera_manager.calibrate_pitch,
+        mode=mode,
+        marker_distance_m=marker_distance_m,
+        y_marker=float(y_marker) if y_marker is not None else None,
+        camera_height_m=float(cam_h) if cam_h is not None else None,
+    )
+    updated_specs = robot_config.get_specs()
+    if server_context.robot:
+        server_context.robot.sync_dynamic_config(updated_specs)
+    await ws_manager.broadcast({"type": "camera_status", "camera": res["status"]})
+    await ws_manager.broadcast({"type": "config_specs_updated", "specs": updated_specs})
+    return res
 
 
 @router.get("/api/camera/stream")
@@ -727,9 +765,14 @@ async def websocket_endpoint(websocket: WebSocket):
             elif msg_type == "camera_config":
                 cam_status = camera_manager.set_config(
                     k1=msg.get("k1"),
-                    camera_tilt_deg=msg.get("camera_tilt_deg", msg.get("tilt")),
+                    camera_tilt_deg=msg.get("camera_pitch_deg", msg.get("camera_tilt_deg", msg.get("tilt"))),
+                    camera_pitch_deg=msg.get("camera_pitch_deg"),
+                    camera_height_m=msg.get("camera_height_m"),
+                    auto_pitch=msg.get("auto_pitch"),
                     current_mission=msg.get("current_mission", msg.get("mission")),
                 )
+                if server_context.robot:
+                    server_context.robot.sync_dynamic_config(robot_config.get_specs())
                 await ws_manager.broadcast({"type": "camera_status", "camera": cam_status})
 
 

@@ -106,9 +106,9 @@ DEFAULT_ROBOT_SPECS: Dict[str, Any] = {
     "solar_closed_length_cm": 173.0,
     "solar_closed_width_cm": 106.0,
     "solar_deployed_span_cm": 99.0,
-    "camera_height_cm": 75.0,
+    "camera_height_cm": 90.0,
     "camera_to_front_axle_cm": 25.0,
-    "camera_tilt_deg": 35.0,
+    "camera_tilt_deg": 32.0,
 }
 
 
@@ -146,6 +146,8 @@ class RobotController:
         self.mission_progress: int = 0
         self.mission_step_label: str = "En attente"
         self.mission_paused: bool = False
+        self.last_mission_alert: Optional[Dict[str, Any]] = None
+        self._last_corridor_ended_by_vision: bool = False
         self.done_history: List[Dict[str, Any]] = []
         self._mission_thread: Optional[threading.Thread] = None
         self._mission_stop_flag = threading.Event()
@@ -292,6 +294,13 @@ class RobotController:
         self.heartbeat_enabled: bool = True
         self.heartbeat_thread = threading.Thread(target=self._heartbeat_loop, name="Heartbeat", daemon=True)
         self.heartbeat_thread.start()
+
+        # Synchronisation live avec la source unique de vérité `robot_config` (angle/hauteur caméra, dimensions)
+        try:
+            self.sync_dynamic_config(robot_config.get_specs())
+            robot_config.register_listener(self.sync_dynamic_config)
+        except Exception as e:
+            logger.debug("Sync initiale robot_config ignorée : %s", e)
 
     # --------------------------------------------------------------------------
     # Initialisation de la connexion & Pont Matériel ESP32-S3 Firmware v2
@@ -984,6 +993,7 @@ class RobotController:
             "field_width_m": self.field_width_m,
             "corridors_total": self.corridors_total,
             "current_corridor": self.current_corridor,
+            "last_mission_alert": self.last_mission_alert,
             "done_history": self.done_history[-20:],
         }
 
@@ -1259,6 +1269,18 @@ class RobotController:
             self._emit_log("RX", "OK ESTOP")
             return "OK ESTOP"
 
+        # Priorité Haute STOP global : coupure immédiate de la vitesse et envoi direct ESP32
+        if clean_upper == "STOP":
+            self.speed_kmh = 0.0
+            for ev in self.done_events.values():
+                ev.set()
+            if self.execution_mode in (ExecutionMode.COUPLED.value, ExecutionMode.REAL_ZERO_SIM.value) and self.hardware_bridge.connected:
+                res_stop = self.hardware_bridge.send_command(
+                    "STOP", timeout=timeout, with_checksum=self.use_xor_checksum, silent=False
+                )
+                self._force_stop_simulator(disarm=False)
+                return res_stop
+
         use_crc = self.use_xor_checksum if with_checksum is None else bool(with_checksum)
         wire_cmd = format_command_with_optional_crc(clean_cmd, use_xor_checksum=use_crc)
 
@@ -1337,7 +1359,7 @@ class RobotController:
                 self._mission_stop_flag.set()
                 self._force_stop_simulator(disarm=True)
                 self._mirror_command_to_simulator(wire_cmd)
-            elif res_upper.startswith("ERR: ESTOP"):
+            elif res_upper.replace(" ", "").startswith("ERR:ESTOP"):
                 # Le robot physique a refusé la commande (non armé) : le simulateur 3D ne bouge pas !
                 self.armed = 0
                 self.is_armed = False
@@ -1498,6 +1520,30 @@ class RobotController:
             except Exception:
                 pass
 
+    def _emit_mission_alert(self, level: str, code: str, message: str, progress: Optional[int] = None) -> None:
+        """Émet une alerte mission visible dans l'UI (bannière dédiée) et dans la console de commandes."""
+        alert = {
+            "level": level,  # "error", "warning", "success", "info"
+            "code": code,
+            "message": message,
+            "ts": int(time.time() * 1000),
+        }
+        self.last_mission_alert = alert
+        if progress is not None:
+            self.mission_progress = max(0, min(100, int(progress)))
+        self.mission_step_label = message
+        if level in ("error", "warning"):
+            logger.warning("[MISSION %s] %s", code, message)
+        else:
+            logger.info("[MISSION %s] %s", code, message)
+        self._emit_log("RX", message)
+        for cb in self.event_callbacks:
+            try:
+                cb("MISSION_ALERT", alert)
+                cb("MISSION_PROGRESS", self.get_mission_state())
+            except Exception:
+                pass
+
     def _check_pause_or_stop(self) -> bool:
         """Vérifie si la mission est interrompue ou mise en pause. Retourne False si interrompue."""
         if self._mission_stop_flag.is_set() or self.estop_active or not self.is_armed or self.armed == 0:
@@ -1551,9 +1597,97 @@ class RobotController:
     def _wrap_angle(a: float) -> float:
         return math.atan2(math.sin(a), math.cos(a))
 
-    def _verify_peanut_row_present_after_turn(self, required_invalid_frames: int = 5) -> bool:
-        """Après un demi-tour en mode REAL_ZERO_SIM, vérifie s'il y a encore de l'arachide sur la ligne suivante.
-        Si le classificateur retourne Sol Nu sur 5 frames consécutives, arrête définitivement la mission.
+    def _verify_initial_line_presence(
+        self,
+        mission_type: str = "SEEDING",
+        sample_frames: int = 8,
+        frame_delay_s: float = 0.14,
+    ) -> bool:
+        """Vérification obligatoire avant le premier DRIVE en mode REAL_ZERO_SIM :
+        1. Si un vrai ESP32-S3 est connecté mais que la caméra est déconnectée ou synthétique -> bloque le mouvement.
+        2. Échantillonne 5 à 10 frames (~1.0 à 1.5 s) pour confirmer qu'une ligne valide est visible.
+           Si aucune ligne n'est présente : STOP immédiat, outils OFF, alerte UI/console explicite.
+        """
+        if self._has_live_pose() or self.execution_mode != ExecutionMode.REAL_ZERO_SIM.value:
+            return True
+
+        try:
+            from backend.vision.camera_manager import camera_manager as _cm
+        except Exception:
+            return True
+
+        # Garde-fou matériel : interdire tout mouvement physique ESP32 sur flux synthétique ou caméra déconnectée
+        if self.hardware_bridge.connected and (not getattr(_cm, "connected", False) or getattr(_cm, "is_synthetic", False)):
+            self.stop()
+            self.stop_motor(6)
+            self.stop_motor(8)
+            if self.tines_depth > 0.05:
+                self.pulse(5, -50, 4000)
+                self.wait_for_done([5], timeout=5.0)
+            self.state = "CAMERA_SAFETY_BLOCKED"
+            self._emit_mission_alert(
+                level="error",
+                code="SYNTHETIC_CAMERA_BLOCKED",
+                message="⚠️ Caméra USB réelle déconnectée ou en mode synthétique — Mouvement physique bloqué par sécurité",
+                progress=0,
+            )
+            return False
+
+        m_norm = str(mission_type or "SEEDING").strip().upper()
+        try:
+            _cm.pipeline.consecutive_no_line_frames = 0
+            _cm.pipeline.consecutive_non_peanut_frames = 0
+        except Exception:
+            pass
+
+        self._notify_mission_progress(6, "🔍 Vérification caméra : recherche d'une ligne valide avant départ...")
+        total_samples = max(1, int(sample_frames))
+        required_hits = 1 if total_samples <= 2 else 2
+        valid_hits = 0
+
+        for idx in range(total_samples):
+            if not self._check_pause_or_stop():
+                return False
+            cam_telem = _cm.get_latest_telemetry()
+            if m_norm == "SEEDING":
+                line_ok = bool(cam_telem.get("guideline_detected", False))
+            else:
+                line_ok = bool(
+                    cam_telem.get("row_detected", False)
+                    and (cam_telem.get("is_valid_peanut_row") is not False)
+                    and not cam_telem.get("hybrid_boundary_alert", False)
+                )
+            if line_ok:
+                valid_hits += 1
+                if valid_hits >= required_hits:
+                    return True
+            if idx < total_samples - 1 and frame_delay_s > 0:
+                time.sleep(frame_delay_s)
+
+        # Aucune ligne valide détectée -> arrêt complet, outils relevés/coupés, alerte explicite
+        self.stop()
+        self.stop_motor(6)
+        self.stop_motor(8)
+        if self.tines_depth > 0.05:
+            self.pulse(5, -50, 4000)
+            self.wait_for_done([5], timeout=5.0)
+        self.state = "ABORTED_NO_LINE"
+        self._emit_mission_alert(
+            level="error",
+            code="NO_LINE_DETECTED",
+            message="⚠️ Aucune ligne détectée par le robot — Mission arrêtée",
+            progress=0,
+        )
+        return False
+
+    def _verify_peanut_row_present_after_turn(
+        self,
+        required_invalid_frames: int = 5,
+        mission_type: str = "WEEDING",
+    ) -> bool:
+        """Après un demi-tour en mode REAL_ZERO_SIM, vérifie s'il existe une ligne suivante (5 frames).
+        Si aucune ligne n'est présente sur 5 frames consécutives, arrête proprement la mission
+        avec le message « ✅ Fin de parcelle — Aucune ligne suivante détectée ».
         """
         if self._has_live_pose() or self.execution_mode != ExecutionMode.REAL_ZERO_SIM.value:
             return True
@@ -1562,23 +1696,38 @@ class RobotController:
         except Exception:
             return True
 
+        m_norm = str(mission_type or "WEEDING").strip().upper()
         invalid_count = 0
-        for _ in range(required_invalid_frames):
+        for _ in range(max(1, int(required_invalid_frames))):
+            if not self._check_pause_or_stop():
+                return False
             cam_telem = _cm.get_latest_telemetry()
-            if cam_telem.get("is_valid_peanut_row") is False or cam_telem.get("hybrid_boundary_alert"):
+            if m_norm == "SEEDING":
+                is_missing = (cam_telem.get("guideline_detected") is False) or bool(cam_telem.get("line_end_confirmed"))
+            else:
+                is_missing = (
+                    cam_telem.get("is_valid_peanut_row") is False
+                    or bool(cam_telem.get("hybrid_boundary_alert"))
+                    or (cam_telem.get("row_detected") is False)
+                )
+            if is_missing:
                 invalid_count += 1
             else:
                 return True
-            time.sleep(0.04)
+            time.sleep(0.05)
 
         if invalid_count >= required_invalid_frames:
             self.stop()
             self.stop_motor(6)
             self.stop_motor(8)
             self.state = "MISSION_COMPLETED_BY_HYBRID_VISION"
-            msg = "🛑 MISSION TERMINÉE — FIN DES LIGNES D'ARACHIDE"
-            logger.info("[HYBRID VISION] %s", msg)
-            self._notify_mission_progress(100, msg)
+            msg = "✅ Fin de parcelle — Aucune ligne suivante détectée"
+            self._emit_mission_alert(
+                level="success",
+                code="FIELD_END_NO_NEXT_ROW",
+                message=msg,
+                progress=100,
+            )
             return False
         return True
 
@@ -1593,8 +1742,10 @@ class RobotController:
         weeding: bool = False,
         reseeding: bool = False,
         fallback_steps: int = 8,
+        continuous_vision: bool = False,
     ) -> bool:
         """Avance dans le couloir en maintenant M5/M6 centrés (DRIVE rafraîchi en continu, sans à-coups)."""
+        self._last_corridor_ended_by_vision = False
         if not self._has_live_pose():
             # Mode Zéro Simulation (100% Réel) piloté par la Caméra USB (78°) OpenCV OU fallback pas fixes
             use_real_cam = self.execution_mode == ExecutionMode.REAL_ZERO_SIM.value
@@ -1607,8 +1758,19 @@ class RobotController:
                     cam_mgr = None
 
             cutter_running_real = weeding
-            consec_invalid_peanut = 0
-            for step_idx in range(fallback_steps):
+            consec_missing_line = 0
+            # En mission réelle continue (sans encodeurs roues), ne pas s'arrêter arbitrairement après 3 s :
+            # calculer un plafond réaliste depuis la longueur de parcelle (≈ 0.16 m / pas de 400 ms) ou 300 pas en mode SMART_LINE_END.
+            if continuous_vision and cam_mgr is not None:
+                is_smart_end = (
+                    getattr(self.kinematic_engine, "boundary_mode", "FIXED_DIMENSIONS") == "SMART_LINE_END"
+                )
+                est_steps = max(int(fallback_steps), int(round(max(1.0, float(self.field_length_m)) / 0.16)) + 20)
+                max_steps = max(est_steps, 300) if is_smart_end else est_steps
+            else:
+                max_steps = max(1, int(fallback_steps))
+
+            for step_idx in range(max_steps):
                 if not self._check_pause_or_stop():
                     return False
 
@@ -1661,27 +1823,43 @@ class RobotController:
                             if weeding:
                                 self.motor(6, 70)
 
-                    # Arrêt immédiat fin de ligne d'arachide (Sol Nu sur 5 frames consécutives)
+                    # Détection fin de ligne (5 frames consécutives sans ligne) pour TOUTES les missions autonomes
                     if weeding or reseeding:
-                        is_row_ok = cam_telem.get("is_valid_peanut_row", True)
-                        if is_row_ok is False or cam_telem.get("hybrid_boundary_alert"):
-                            consec_invalid_peanut += 1
-                        else:
-                            consec_invalid_peanut = 0
+                        is_line_missing = (
+                            cam_telem.get("is_valid_peanut_row") is False
+                            or bool(cam_telem.get("hybrid_boundary_alert"))
+                            or (cam_telem.get("row_detected") is False)
+                        )
+                    else:
+                        is_line_missing = (
+                            (cam_telem.get("guideline_detected") is False)
+                            or bool(cam_telem.get("line_end_confirmed"))
+                        )
 
-                        if cam_telem.get("hybrid_line_end_confirmed") or consec_invalid_peanut >= 5:
-                            self.stop()
-                            self.stop_motor(6)
-                            self.stop_motor(8)
-                            if weeding or self.seeding_use_tines:
-                                self.pulse(5, -50, 4000)
-                                self.wait_for_done([5], timeout=5.0)
-                            alert_msg = cam_telem.get("hybrid_hud_badge") or (
-                                "🛑 FIN DE LIGNE D'ARACHIDE : Sol nu détecté (5 frames) -> Arrêt / Demi-tour"
-                            )
-                            logger.warning("[HYBRID VISION] %s", alert_msg)
-                            self._notify_mission_progress(pct_end, alert_msg)
-                            break
+                    if is_line_missing:
+                        consec_missing_line += 1
+                    else:
+                        consec_missing_line = 0
+
+                    confirmed_line_end = bool(
+                        consec_missing_line >= 5
+                        or (weeding or reseeding) and cam_telem.get("hybrid_line_end_confirmed")
+                        or cam_telem.get("line_end_confirmed")
+                    )
+                    if confirmed_line_end:
+                        self.stop()
+                        self.stop_motor(6)
+                        self.stop_motor(8)
+                        if weeding or self.seeding_use_tines:
+                            self.pulse(5, -50, 4000)
+                            self.wait_for_done([5], timeout=5.0)
+                        self._last_corridor_ended_by_vision = True
+                        alert_msg = cam_telem.get("hybrid_hud_badge") if (weeding or reseeding) else None
+                        if not alert_msg:
+                            alert_msg = "🛑 FIN DE LIGNE DÉTECTÉE (5 frames) -> Arrêt outils & Demi-tour"
+                        logger.warning("[VISION FIN DE LIGNE] %s", alert_msg)
+                        self._notify_mission_progress(pct_end, alert_msg)
+                        break
 
                     if weeding and int(cam_telem.get("weeds_detected_count", 0)) > 0:
                         if not cutter_running_real:
@@ -1694,14 +1872,19 @@ class RobotController:
                         gaps_n = max(1, int(cam_telem.get("reseed_gaps_count", cam_telem.get("gaps_count", 1))))
                         self.reseeded_seeds_count += gaps_n
                         self.gaps_detected_count += 1
-                    elif not weeding and not reseeding:
+                    elif not weeding and not reseeding and not is_line_missing:
                         self.seeds_sown += 2
 
                     a_val = int(rec.get("a", 25))
                     d_val = int(rec.get("d", 0))
-                    self.drive(a_val, d_val, ms=400)
-                    self.wait_for_done([1, 2, 3, 4], timeout=1.2)
-                    pct = pct_start + int((step_idx + 1) / fallback_steps * (pct_end - pct_start))
+                    if a_val == 0 and d_val == 0 and is_line_missing:
+                        # Frame manquante isolée (1..4) : pause courte sans avancer à l'aveugle
+                        self.stop()
+                        time.sleep(0.06)
+                    else:
+                        self.drive(a_val, d_val, ms=400)
+                        self.wait_for_done([1, 2, 3, 4], timeout=1.2)
+                    pct = pct_start + int((step_idx + 1) / max_steps * (pct_end - pct_start))
                     hud_str = cam_telem.get("hud_message") or f"écart {lat_cm:+.1f}cm Δθ {ang_deg:+.1f}°"
                     self._notify_mission_progress(pct, f"{label} [CAM 78°] : {hud_str} | DRIVE:{a_val},{d_val}:400")
                 else:
@@ -1712,7 +1895,7 @@ class RobotController:
                     rec = res["recommended_drive"]
                     self.drive(int(rec["a"]), int(rec["d"]), ms=400)
                     self.wait_for_done([1, 2, 3, 4], timeout=1.2)
-                    pct = pct_start + int((step_idx + 1) / fallback_steps * (pct_end - pct_start))
+                    pct = pct_start + int((step_idx + 1) / max_steps * (pct_end - pct_start))
                     self._notify_mission_progress(pct, f"{label} : DRIVE:{rec['a']},{rec['d']}:400")
             return True
 
@@ -2474,16 +2657,29 @@ class RobotController:
         Retourne (succès, nouveau cap).
         """
         self.weeding_state = "TURN_AND_APPROACH"
+        self.stop()
         self.stop_motor(6)
+        self.stop_motor(8)
         new_heading = self._wrap_angle(current_heading + math.pi)
         if not self._has_live_pose():
-            turn_sign = 1 if next_center_x > self.robot_x else -1
-            self.tank(35 * turn_sign, -35 * turn_sign, ms=450)
-            self.wait_for_done([1, 2, 3, 4], timeout=1.2)
-            self.drive(24, 0, ms=400)
-            self.wait_for_done([1, 2, 3, 4], timeout=1.2)
-            self.tank(35 * turn_sign, -35 * turn_sign, ms=450)
-            self.wait_for_done([1, 2, 3, 4], timeout=1.2)
+            # Convention terrain : progression_direction = -1 (DROITE) / +1 (GAUCHE).
+            # En firmware DRIVE/TANK, TANK:+35,-35 pivote à DROITE, TANK:-35,+35 pivote à GAUCHE.
+            dx_global = next_center_x - self.robot_x
+            if abs(dx_global) < 1e-4:
+                dx_global = float(self.progression_direction)
+            facing_sign = 1 if math.cos(current_heading) >= 0 else -1
+            turn_right = (dx_global * facing_sign) < 0
+            turn_sign = 1 if turn_right else -1
+
+            self.tank(35 * turn_sign, -35 * turn_sign, ms=750)
+            self.wait_for_done([1, 2, 3, 4], timeout=1.6)
+            self.drive(24, 0, ms=850)
+            self.wait_for_done([1, 2, 3, 4], timeout=1.6)
+            self.tank(35 * turn_sign, -35 * turn_sign, ms=750)
+            self.wait_for_done([1, 2, 3, 4], timeout=1.6)
+            self.stop()
+            self.robot_x = float(next_center_x)
+            self.robot_yaw = new_heading
             self.current_target_heading_rad = new_heading
             return True, new_heading
 
@@ -2519,7 +2715,7 @@ class RobotController:
                     dx_cm = float(cam_telem.get("lateral_error_cm", 0.0))
                     heading_err_deg = float(cam_telem.get("heading_error_deg", 0.0))
                     if abs(dx_cm) > 3.0 or abs(heading_err_deg) > 3.0:
-                        d_corr = int(max(-20, min(20, round(-dx_cm * 1.2 - heading_err_deg * 0.8))))
+                        d_corr = int(max(-20, min(20, round(+dx_cm * 1.2 - heading_err_deg * 0.8))))
                         self.drive(12, d_corr, ms=180)
                         self.wait_for_done([1, 2, 3, 4], timeout=0.6)
                 except Exception:
@@ -2711,6 +2907,7 @@ class RobotController:
 
         self.mode = RobotMode.AUTO
         self.current_mission_name = mission_name
+        self.last_mission_alert = None
         vision_mode_map = {
             "seeding": "SEEDING",
             "reseeding": "RESEEDING",
@@ -2748,7 +2945,7 @@ class RobotController:
             self.mission_running = True
             try:
                 ok = target_map[mission_name]()
-                if ok and not self._mission_stop_flag.is_set():
+                if ok and not self._mission_stop_flag.is_set() and self.last_mission_alert is None:
                     self._notify_mission_progress(100, f"Mission {mission_name} terminée avec succès")
             except Exception as e:
                 logger.error("Erreur durant la mission %s : %s", mission_name, e)
@@ -2758,7 +2955,11 @@ class RobotController:
                 self.mission_paused = False
                 self._mission_pause_event.set()
                 self.mode = RobotMode.MANUAL
-                self._notify_mission_progress(0, "Prêt")
+                if self.last_mission_alert is not None:
+                    pct_final = 100 if self.last_mission_alert.get("level") == "success" else 0
+                    self._notify_mission_progress(pct_final, self.last_mission_alert["message"])
+                else:
+                    self._notify_mission_progress(0, "Prêt")
                 logger.info("Mission %s terminée, retour en mode MANUAL", mission_name)
                 for cb in getattr(self, "on_mission_stopped_callbacks", []):
                     try:
@@ -2823,11 +3024,17 @@ class RobotController:
         if not self._check_pause_or_stop():
             return False
 
+        # Vérification obligatoire de présence de ligne avant tout mouvement / abaissement outil en mode réel
+        if not self._verify_initial_line_presence("SEEDING"):
+            self.stop()
+            return False
+
         # Alignement initial sur le cap du couloir
         if not self._pivot_to_heading(heading):
             return False
 
         completed = True
+        use_continuous = self.execution_mode == ExecutionMode.REAL_ZERO_SIM.value
         for pass_idx in range(1, passes_to_exec + 1):
             self.current_corridor = pass_idx
             if not self._check_pause_or_stop():
@@ -2850,7 +3057,7 @@ class RobotController:
             self.pulse(8, 75, 350)
             time.sleep(0.15)
 
-            # 3. Avance guidée en boucle fermée sur toute la longueur saisie
+            # 3. Avance guidée en boucle fermée sur toute la longueur saisie (ou jusqu'à fin de ligne caméra)
             pct_a = 20 + int(((pass_idx - 1) / passes_to_exec) * 65)
             pct_b = 20 + int((pass_idx / passes_to_exec) * 65)
             if not self._follow_corridor(
@@ -2863,15 +3070,17 @@ class RobotController:
                 weeding=False,
                 reseeding=False,
                 fallback_steps=steps_per_pass,
+                continuous_vision=use_continuous,
             ):
                 completed = False
 
             # 4. Bout de ligne : arrêt semoir STOP:8 et relevage dents M5 avant demi-tour
             self.auto_seed_enabled = False
+            self.stop()
             self.stop_motor(8)
             time.sleep(0.15)
 
-            if self.seeding_use_tines:
+            if self.seeding_use_tines and not self._last_corridor_ended_by_vision:
                 self._notify_mission_progress(88, f"Bout de passe {pass_idx}/{passes_to_exec} : Relevage dents (PULSE:5:-50:4000)")
                 self.pulse(5, -50, 4000)
                 self.wait_for_done([5], timeout=6.0)
@@ -2886,7 +3095,7 @@ class RobotController:
                 ok, heading = self._headland_turn(heading, corridor_x)
                 if not ok:
                     completed = False
-                elif not self._verify_peanut_row_present_after_turn():
+                elif not self._verify_peanut_row_present_after_turn(mission_type="SEEDING"):
                     break
             if not completed:
                 break
@@ -2937,12 +3146,19 @@ class RobotController:
         # Sécurité outils : dents relevées, fraise coupée, semoir prêt
         self.stop_motor(6)
         self.stop_motor(8)
+
+        # Vérification obligatoire de présence de ligne d'arachide avant tout mouvement en mode réel
+        if not self._verify_initial_line_presence("RESEEDING"):
+            self.stop()
+            return False
+
         self.pulse(5, -50, 4000)
 
         if not self._pivot_to_heading(heading):
             return False
 
         completed = True
+        use_continuous = self.execution_mode == ExecutionMode.REAL_ZERO_SIM.value
         for pass_idx in range(1, passes_to_exec + 1):
             self.current_corridor = pass_idx
             if not self._check_pause_or_stop():
@@ -2962,9 +3178,11 @@ class RobotController:
                 weeding=False,
                 reseeding=True,
                 fallback_steps=steps_per_pass,
+                continuous_vision=use_continuous,
             ):
                 completed = False
 
+            self.stop()
             self.stop_motor(8)
             self.reviewed_rows_count += 2
 
@@ -2978,7 +3196,7 @@ class RobotController:
                 ok, heading = self._headland_turn(heading, corridor_x)
                 if not ok:
                     completed = False
-                elif not self._verify_peanut_row_present_after_turn():
+                elif not self._verify_peanut_row_present_after_turn(mission_type="RESEEDING"):
                     break
             if not completed:
                 break
@@ -3152,6 +3370,12 @@ class RobotController:
 
         # Sécurité : outils strictement relevés et fraise coupée avant le premier engagement
         self.stop_motor(6)
+
+        # Vérification obligatoire de présence de rang d'arachide avant tout mouvement / descente dents en mode réel
+        if not self._verify_initial_line_presence("WEEDING"):
+            self.stop()
+            return False
+
         self.pulse(5, -50, 4000)
 
         # Alignement initial sur le cap du couloir avant de descendre les outils
@@ -3159,6 +3383,7 @@ class RobotController:
             return False
 
         completed = True
+        use_continuous = self.execution_mode == ExecutionMode.REAL_ZERO_SIM.value
         for corridor_idx in range(1, corridors_to_exec + 1):
             self.current_corridor = corridor_idx
             self.current_corridor_center_x = corridor_x
@@ -3222,6 +3447,7 @@ class RobotController:
                 pct_end=pct_b,
                 weeding=True,
                 fallback_steps=steps_per_corridor,
+                continuous_vision=use_continuous,
             ):
                 completed = False
 
@@ -3238,10 +3464,11 @@ class RobotController:
             self.stop_motor(6)
             time.sleep(0.1)
 
-            # Relevage complet des dents M5 AVANT demi-tour
-            self._notify_mission_progress(90, f"Bout de passe {corridor_idx}/{corridors_to_exec} : Relevage dents (PULSE:5:-50:4000)")
-            self.pulse(5, -50, 4000)
-            self.wait_for_done([5], timeout=6.0)
+            # Relevage complet des dents M5 AVANT demi-tour (si pas déjà relevées par la détection fin de ligne)
+            if not self._last_corridor_ended_by_vision:
+                self._notify_mission_progress(90, f"Bout de passe {corridor_idx}/{corridors_to_exec} : Relevage dents (PULSE:5:-50:4000)")
+                self.pulse(5, -50, 4000)
+                self.wait_for_done([5], timeout=6.0)
 
             # ------------------------------------------------------------------
             # État 1 — TURN_AND_APPROACH (Demi-tour, Dents 100% Relevées, Fraise OFF)
@@ -3261,7 +3488,7 @@ class RobotController:
                 self.current_target_heading_rad = heading
                 if not ok:
                     completed = False
-                elif not self._verify_peanut_row_present_after_turn():
+                elif not self._verify_peanut_row_present_after_turn(mission_type="WEEDING"):
                     break
             if not completed:
                 break
