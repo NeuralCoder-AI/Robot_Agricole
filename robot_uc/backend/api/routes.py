@@ -48,9 +48,29 @@ class MissionRequest(BaseModel):
     spacing_cm: int | None = None
     seed_with_tines_down: bool | None = None
     progression_direction: int | None = 1
+    direction_mode: str | None = None
     start_x: float | None = None
     start_z: float | None = None
     boundary_mode: str | None = None
+
+
+def _require_not_mission_locked(action_desc: str = "cette opération") -> None:
+    """Mission Lock côté serveur : rejette en HTTP 409 Conflict toute mutation concurrente
+    (changement de mission, calibration, géométrie, reconnexion matériel/caméra) pendant une mission active ou en pause.
+    """
+    if server_context.robot and server_context.robot.is_mission_locked():
+        snap = server_context.robot.get_mission_snapshot()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "MISSION_LOCKED",
+                "message": (
+                    f"Mission active ({snap.get('mission_label')}) : impossible de {action_desc} "
+                    "tant que la mission n'est pas arrêtée (STOP/ESTOP)."
+                ),
+                "mission_snapshot": snap,
+            },
+        )
 
 
 # ------------------------------------------------------------------------------
@@ -58,18 +78,24 @@ class MissionRequest(BaseModel):
 # ------------------------------------------------------------------------------
 @router.get("/api/status")
 async def get_status(request: Request):
-    """Retourne l'état actuel complet du robot avec IP réévaluée en temps réel."""
+    """Retourne l'état actuel complet du robot (incluant mission_snapshot & caméra) avec IP réévaluée en temps réel."""
     live_ip = detect_local_wifi_ip(request_host=request.headers.get("host"))
+    snap = server_context.robot.get_mission_snapshot()
     return {
         "armed": server_context.robot.armed,
         "mode": server_context.robot.mode.value,
         "mission": server_context.robot.current_mission_name,
+        "mission_running": server_context.robot.mission_running,
+        "mission_active": snap["mission_active"],
+        "mission_paused": snap["mission_paused"],
         "mission_state": server_context.robot.get_mission_state(),
+        "mission_snapshot": snap,
         "use_simulator": server_context.robot.use_simulator,
         "last_telemetry": server_context.robot.last_telemetry,
         "agronomics": server_context.robot.get_agronomic_metrics(),
         "robot_specs": server_context.robot.get_robot_specs(),
         "hardware": server_context.robot.get_hardware_status(),
+        "camera": camera_manager.get_status(),
         "solar_bms": server_context.robot.solar_bms.get_status(),
         "ekf_localization": server_context.robot.ekf_localizer.get_state(),
         "seed_map": server_context.robot.seed_map.summary(),
@@ -118,6 +144,7 @@ async def get_camera_status():
 @router.post("/api/camera/connect")
 async def post_camera_connect(payload: Dict[str, Any]):
     """Connecte la Caméra USB (78°) (/dev/video0 prioritaire sur ROBOT_UC) et démarre le flux."""
+    _require_not_mission_locked("reconnecter la caméra")
     dev = payload.get("device_index", payload.get("index"))
     w = payload.get("width", 1280 if is_robot_uc_mode() else 640)
     h = payload.get("height", 720 if is_robot_uc_mode() else 480)
@@ -148,6 +175,7 @@ async def post_camera_connect(payload: Dict[str, Any]):
 @router.post("/api/camera/disconnect")
 async def post_camera_disconnect():
     """Déconnecte la Caméra USB (78°)."""
+    _require_not_mission_locked("déconnecter la caméra")
     status = await asyncio.to_thread(camera_manager.disconnect)
     await ws_manager.broadcast({"type": "camera_status", "camera": status})
     return status
@@ -156,6 +184,7 @@ async def post_camera_disconnect():
 @router.post("/api/camera/config")
 async def post_camera_config(payload: Dict[str, Any]):
     """Configure la distorsion k1, l'inclinaison caméra (manuel/auto), la hauteur ou la mission."""
+    _require_not_mission_locked("modifier la configuration caméra")
     k1 = payload.get("k1")
     tilt = payload.get("camera_pitch_deg", payload.get("camera_tilt_deg", payload.get("tilt_deg", payload.get("tilt"))))
     cam_h = payload.get("camera_height_m")
@@ -178,6 +207,7 @@ async def post_camera_config(payload: Dict[str, Any]):
 @router.post("/api/camera/calibrate-pitch")
 async def post_camera_calibrate_pitch(payload: Optional[Dict[str, Any]] = None):
     """Déclenche l'auto-calibration de l'angle caméra (Point de Fuite ou Mire au sol 1.00 m)."""
+    _require_not_mission_locked("recalibrer l'angle caméra")
     body = payload or {}
     mode = str(body.get("mode", "vanishing_point"))
     marker_distance_m = float(body.get("marker_distance_m", 1.0))
@@ -211,6 +241,7 @@ def get_camera_stream():
 @router.post("/api/hardware/mode")
 async def post_hardware_mode(payload: Dict[str, Any]):
     """Change le mode d'exécution (SIMULATION_ONLY vs COUPLED) et diffuse l'état."""
+    _require_not_mission_locked("changer le mode d'exécution")
     mode = str(payload.get("execution_mode") or payload.get("mode") or "SIMULATION_ONLY")
     hw = server_context.robot.set_execution_mode(mode)
     await ws_manager.broadcast({"type": "hardware_status", "hardware": hw})
@@ -221,6 +252,7 @@ async def post_hardware_mode(payload: Dict[str, Any]):
 @router.post("/api/hardware/connect")
 async def post_hardware_connect(payload: Dict[str, Any]):
     """Configure et teste la connexion au vrai robot ESP32-S3 (PING -> PONG + VER + STATUS)."""
+    _require_not_mission_locked("reconnecter le matériel ESP32-S3")
     logger.info("Connexion matériel demandée: transport=%s host=%s port=%s serial=%s", payload.get("transport"), payload.get("host"), payload.get("port"), payload.get("serial_port"))
     hw = await anyio.to_thread.run_sync(server_context.robot.configure_and_connect_hardware, payload)
     logger.info("Résultat connexion: connected=%s last_error=%s latency=%s", hw.get("connected"), hw.get("last_error"), hw.get("latency_ms"))
@@ -232,6 +264,7 @@ async def post_hardware_connect(payload: Dict[str, Any]):
 @router.post("/api/hardware/disconnect")
 async def post_hardware_disconnect():
     """Ferme la connexion au robot physique ESP32-S3."""
+    _require_not_mission_locked("déconnecter le matériel ESP32-S3")
     hw = await anyio.to_thread.run_sync(server_context.robot.disconnect_hardware)
     await ws_manager.broadcast({"type": "hardware_status", "hardware": hw})
     await ws_manager.broadcast(build_state_payload("state"))
@@ -259,6 +292,7 @@ async def post_hardware_read_config():
 @router.post("/api/hardware/calibrate")
 async def post_hardware_calibrate(payload: Dict[str, Any]):
     """Applique les réglages NVS d'un moteur (INV, MIN, MAX, RAMP, TMAX)."""
+    _require_not_mission_locked("modifier la calibration NVS")
     res = server_context.robot.calibrate_motor_nvs(
         motor_id=int(payload.get("motor", 1)),
         inv=payload.get("inv"),
@@ -283,6 +317,7 @@ async def get_config_specs():
 @router.post("/api/config/specs")
 async def put_config_specs(payload: Dict[str, Any]):
     """Met à jour et persiste les dimensions dynamiques du robot dans robot_specs.sqlite / robot_specs.json."""
+    _require_not_mission_locked("modifier la géométrie/configuration du robot")
     updated = robot_config.update_specs(payload)
     if server_context.robot:
         server_context.robot.sync_dynamic_config(updated)
@@ -300,6 +335,7 @@ async def put_config_specs(payload: Dict[str, Any]):
 @router.post("/api/config/specs/reset")
 async def reset_config_specs():
     """Réinitialise les dimensions dynamiques aux valeurs par défaut."""
+    _require_not_mission_locked("réinitialiser la configuration du robot")
     reset_val = robot_config.reset_specs()
     if server_context.robot:
         server_context.robot.sync_dynamic_config(reset_val)
@@ -322,6 +358,7 @@ async def get_robot_specs():
 @router.post("/api/robot-specs")
 async def post_robot_specs(specs: Dict[str, Any]):
     """Met à jour les dimensions du robot à la volée, les sauvegarde dans robot_specs.json et diffuse specs_updated."""
+    _require_not_mission_locked("modifier les dimensions du robot")
     updated = server_context.robot.update_robot_specs(specs)
     await ws_manager.broadcast(
         {
@@ -337,6 +374,7 @@ async def post_robot_specs(specs: Dict[str, Any]):
 @router.post("/api/robot-specs/reset")
 async def post_robot_specs_reset():
     """Réinitialise toutes les dimensions aux vraies mesures du relevé terrain (DEFAULT_ROBOT_SPECS)."""
+    _require_not_mission_locked("réinitialiser les dimensions du robot")
     reset_specs = server_context.robot.reset_robot_specs()
     await ws_manager.broadcast(
         {
@@ -399,6 +437,7 @@ async def post_drive(req: DriveRequest):
 
 @router.post("/api/mission")
 async def post_mission(req: MissionRequest):
+    _require_not_mission_locked("démarrer une nouvelle mission")
     steps = [tuple(s) for s in (req.steps or [])]
     extra: Dict[str, Any] = {"steps": steps}
     if req.field_length_m is not None:
@@ -411,6 +450,8 @@ async def post_mission(req: MissionRequest):
         extra["seed_with_tines_down"] = req.seed_with_tines_down
     if req.progression_direction is not None:
         extra["progression_direction"] = req.progression_direction
+    if req.direction_mode is not None:
+        extra["direction_mode"] = req.direction_mode
     if req.start_x is not None:
         extra["start_x"] = req.start_x
     if req.start_z is not None:
@@ -420,6 +461,7 @@ async def post_mission(req: MissionRequest):
     ok = server_context.robot.start_mission_async(req.name, **extra)
     if not ok:
         raise HTTPException(status_code=400, detail="Impossible de lancer la mission (occupé ou inconnue)")
+    snap = server_context.robot.get_mission_snapshot()
     await ws_manager.broadcast(
         {
             "type": "mission_status",
@@ -427,33 +469,51 @@ async def post_mission(req: MissionRequest):
             "started": ok,
             "mode": server_context.robot.mode.value,
             "mission_state": server_context.robot.get_mission_state(),
+            "mission_snapshot": snap,
         }
     )
-    return {"status": "started", "mission": req.name, "mission_state": server_context.robot.get_mission_state()}
+    await ws_manager.broadcast(build_state_payload("state"))
+    return {
+        "status": "started",
+        "mission": req.name,
+        "mission_state": server_context.robot.get_mission_state(),
+        "mission_snapshot": snap,
+    }
 
 
 @router.post("/api/pause")
 async def post_pause():
     ok = server_context.robot.pause_mission()
+    snap = server_context.robot.get_mission_snapshot()
+    await ws_manager.broadcast({"type": "mission_paused", "paused": server_context.robot.mission_paused, "ok": ok, "mission_snapshot": snap})
     await ws_manager.broadcast(build_state_payload("state"))
-    return {"status": "paused" if ok else "not_paused", "paused": server_context.robot.mission_paused}
+    return {"status": "paused" if ok else "not_paused", "paused": server_context.robot.mission_paused, "mission_snapshot": snap}
 
 
 @router.post("/api/resume")
 async def post_resume():
     ok = server_context.robot.resume_mission()
+    snap = server_context.robot.get_mission_snapshot()
+    await ws_manager.broadcast({"type": "mission_resumed", "paused": server_context.robot.mission_paused, "ok": ok, "mission_snapshot": snap})
     await ws_manager.broadcast(build_state_payload("state"))
-    return {"status": "resumed" if ok else "not_resumed", "paused": server_context.robot.mission_paused}
+    return {"status": "resumed" if ok else "not_resumed", "paused": server_context.robot.mission_paused, "mission_snapshot": snap}
 
 
 @router.post("/api/abort")
 async def post_abort():
     server_context.robot.abort_mission()
     server_context.robot.stop()
+    snap = server_context.robot.get_mission_snapshot()
     await ws_manager.broadcast(
-        {"type": "mission_aborted", "mode": server_context.robot.mode.value, "mission_state": server_context.robot.get_mission_state()}
+        {
+            "type": "mission_aborted",
+            "mode": server_context.robot.mode.value,
+            "mission_state": server_context.robot.get_mission_state(),
+            "mission_snapshot": snap,
+        }
     )
-    return {"status": "aborted"}
+    await ws_manager.broadcast(build_state_payload("state"))
+    return {"status": "aborted", "mission_snapshot": snap}
 
 
 # ------------------------------------------------------------------------------
@@ -580,6 +640,19 @@ async def websocket_endpoint(websocket: WebSocket):
                 )
 
             elif msg_type in ("mission", "mission_start"):
+                if server_context.robot.is_mission_locked():
+                    snap = server_context.robot.get_mission_snapshot()
+                    await websocket.send_text(
+                        json.dumps(
+                            {
+                                "type": "mission_lock_rejected",
+                                "status_code": 409,
+                                "message": f"Mission déjà active ({snap.get('mission_label')}) : impossible de lancer une deuxième mission.",
+                                "mission_snapshot": snap,
+                            }
+                        )
+                    )
+                    continue
                 mission_name = msg.get("name") or msg.get("mission") or ""
                 raw_steps = msg.get("steps")
                 steps = [tuple(s) for s in raw_steps] if raw_steps else []
@@ -596,6 +669,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     mission_kwargs["seed_with_tines_down"] = bool(msg["use_tines"])
                 if msg.get("progression_direction") is not None:
                     mission_kwargs["progression_direction"] = int(msg["progression_direction"])
+                if msg.get("direction_mode") is not None:
+                    mission_kwargs["direction_mode"] = str(msg["direction_mode"])
                 if msg.get("start_x") is not None:
                     mission_kwargs["start_x"] = float(msg["start_x"])
                 if msg.get("start_z") is not None:
@@ -603,6 +678,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 if msg.get("boundary_mode") is not None:
                     mission_kwargs["boundary_mode"] = str(msg["boundary_mode"])
                 ok = server_context.robot.start_mission_async(mission_name, **mission_kwargs)
+                snap = server_context.robot.get_mission_snapshot()
                 await ws_manager.broadcast(
                     {
                         "type": "mission_status",
@@ -610,41 +686,52 @@ async def websocket_endpoint(websocket: WebSocket):
                         "started": ok,
                         "mode": server_context.robot.mode.value,
                         "mission_state": server_context.robot.get_mission_state(),
+                        "mission_snapshot": snap,
                     }
                 )
+                await ws_manager.broadcast(build_state_payload("state"))
 
             elif msg_type == "pause_mission":
                 ok = server_context.robot.pause_mission()
+                snap = server_context.robot.get_mission_snapshot()
                 await ws_manager.broadcast(
                     {
                         "type": "mission_paused",
                         "paused": server_context.robot.mission_paused,
                         "ok": ok,
                         "mission_state": server_context.robot.get_mission_state(),
+                        "mission_snapshot": snap,
                     }
                 )
+                await ws_manager.broadcast(build_state_payload("state"))
 
             elif msg_type == "resume_mission":
                 ok = server_context.robot.resume_mission()
+                snap = server_context.robot.get_mission_snapshot()
                 await ws_manager.broadcast(
                     {
                         "type": "mission_resumed",
                         "paused": server_context.robot.mission_paused,
                         "ok": ok,
                         "mission_state": server_context.robot.get_mission_state(),
+                        "mission_snapshot": snap,
                     }
                 )
+                await ws_manager.broadcast(build_state_payload("state"))
 
             elif msg_type == "abort_mission":
                 server_context.robot.abort_mission()
                 server_context.robot.stop()
+                snap = server_context.robot.get_mission_snapshot()
                 await ws_manager.broadcast(
                     {
                         "type": "mission_aborted",
                         "mode": server_context.robot.mode.value,
                         "mission_state": server_context.robot.get_mission_state(),
+                        "mission_snapshot": snap,
                     }
                 )
+                await ws_manager.broadcast(build_state_payload("state"))
 
             elif msg_type == "seed_config":
                 spacing_cm = msg.get("spacing_cm")
@@ -675,6 +762,29 @@ async def websocket_endpoint(websocket: WebSocket):
                     }
                 )
                 await ws_manager.broadcast(build_state_payload("state"))
+
+            elif msg_type in (
+                "update_specs",
+                "reset_specs",
+                "set_execution_mode",
+                "hardware_connect",
+                "hardware_disconnect",
+                "nvs_calibrate",
+                "camera_connect",
+                "camera_disconnect",
+                "camera_config",
+            ) and server_context.robot.is_mission_locked():
+                snap = server_context.robot.get_mission_snapshot()
+                await websocket.send_text(
+                    json.dumps(
+                        {
+                            "type": "mission_lock_rejected",
+                            "status_code": 409,
+                            "message": f"Mission active ({snap.get('mission_label')}) : modification '{msg_type}' refusée tant que la mission n'est pas arrêtée.",
+                            "mission_snapshot": snap,
+                        }
+                    )
+                )
 
             elif msg_type == "update_specs":
                 raw_specs = msg.get("specs") or msg.get("robot_specs") or {}

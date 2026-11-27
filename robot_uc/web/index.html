@@ -1882,6 +1882,64 @@
         </div>
     </div>
 
+    <!-- BANDEAU TEMPS RÉEL : ROBOT EN COURS DE TRAVAIL / PAUSE (SYNCHRONISÉ MULTI-APPAREILS) -->
+    <style>
+        @keyframes liveMissionPulse {
+            0%, 100% { transform: scale(1); opacity: 1; box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); }
+            50% { transform: scale(1.18); opacity: 0.85; box-shadow: 0 0 0 7px rgba(16, 185, 129, 0); }
+        }
+        @keyframes liveMissionPulseOrange {
+            0%, 100% { transform: scale(1); opacity: 1; box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.75); }
+            50% { transform: scale(1.18); opacity: 0.85; box-shadow: 0 0 0 7px rgba(245, 158, 11, 0); }
+        }
+        .live-mission-work-banner {
+            display: none;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            flex-wrap: wrap;
+            padding: 8px 16px;
+            background: linear-gradient(90deg, rgba(6, 78, 59, 0.96), rgba(15, 39, 68, 0.96));
+            border-bottom: 2px solid #10b981;
+            color: #ecfdf5;
+            font-size: 12.5px;
+            font-weight: 800;
+            z-index: 9500;
+        }
+        .live-mission-work-banner.paused {
+            background: linear-gradient(90deg, rgba(120, 53, 15, 0.96), rgba(154, 52, 18, 0.96));
+            border-bottom-color: #f59e0b;
+            color: #fef3c7;
+        }
+        .live-mission-dot {
+            width: 11px;
+            height: 11px;
+            border-radius: 50%;
+            background: #10b981;
+            display: inline-block;
+            flex-shrink: 0;
+            animation: liveMissionPulse 1.4s infinite;
+        }
+        .live-mission-work-banner.paused .live-mission-dot {
+            background: #f59e0b;
+            animation: liveMissionPulseOrange 1.4s infinite;
+        }
+    </style>
+    <div id="liveMissionWorkBanner" class="live-mission-work-banner">
+        <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+            <span id="liveMissionPulseDot" class="live-mission-dot"></span>
+            <span id="liveMissionBannerText">🤖 ROBOT EN COURS DE TRAVAIL — Mission | Initialisation...</span>
+        </div>
+        <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+            <span id="liveMissionElapsed" style="font-family:Consolas,monospace; background:rgba(0,0,0,0.3); padding:3px 8px; border-radius:6px;">⏱ 00:00</span>
+            <span id="liveMissionRowBadge" style="font-family:Consolas,monospace; background:rgba(0,0,0,0.3); padding:3px 8px; border-radius:6px;">🛤️ Rang 1/10</span>
+            <span id="liveMissionDistBadge" style="font-family:Consolas,monospace; background:rgba(0,0,0,0.3); padding:3px 8px; border-radius:6px;">📏 0.0 m</span>
+            <button type="button" id="btnLiveBannerPauseResume" onclick="togglePauseResumeMission()" style="background:#f59e0b; color:#111827; border:none; border-radius:6px; padding:5px 11px; font-size:11.5px; font-weight:900; cursor:pointer;">⏸ Pause</button>
+            <button type="button" onclick="abortAndReturnToPrep()" style="background:#dc2626; color:#fff; border:none; border-radius:6px; padding:5px 11px; font-size:11.5px; font-weight:900; cursor:pointer;">🛑 Arrêter</button>
+            <button type="button" onclick="sendWsCommand('ESTOP')" style="background:#7f1d1d; color:#fecaca; border:1px solid #f87171; border-radius:6px; padding:5px 10px; font-size:11.5px; font-weight:900; cursor:pointer;">🚨 ESTOP</button>
+        </div>
+    </div>
+
     <div class="container main-workspace" id="mainWorkspace">
         <!-- COLONNE GAUCHE IMMERSIVE : JUMEAU NUMÉRIQUE 3D PLEIN ÉCRAN -->
         <div class="card">
@@ -6816,10 +6874,13 @@
                 badgeWs.innerText = "Connecté";
                 badgeWs.style.color = "var(--accent-green)";
                 badgeWs.style.borderColor = "var(--accent-green)";
-                logTerminal("SYSTEM", "WebSocket 3D connecté à l'ESP32-S3");
+                logTerminal("SYSTEM", "WebSocket connecté au serveur robot");
+                // Hydratation complète à chaque connexion / reconnexion WebSocket
+                bootstrapFromServerState("ws_reconnect");
             };
 
             ws.onclose = () => {
+                // Jamais de STOP/ESTOP/reset/disconnect lors d'une coupure ou d'un refresh
                 badgeWs.innerText = "Déconnecté";
                 badgeWs.style.color = "var(--accent-red)";
                 badgeWs.style.borderColor = "var(--accent-red)";
@@ -6846,6 +6907,12 @@
             if (msg.hardware) {
                 applyHardwareStatusUI(msg.hardware);
             }
+            if (msg.camera) {
+                applyCameraStatusUI(msg.camera);
+            }
+            if (msg.mission_snapshot) {
+                applyServerMissionSnapshot(msg.mission_snapshot, msg);
+            }
             if (msg.agronomics) {
                 latestAgronomics = msg.agronomics;
                 if (typeof msg.agronomics.seed_spacing_cm === "number") {
@@ -6859,7 +6926,12 @@
                 }
                 updateAgronomicHUD();
             }
-            if (msg.type === "hardware_status" && msg.hardware) {
+            if (msg.type === "mission_lock_rejected") {
+                showMissionStatusAlert("warning", `🔒 ${msg.message || "Mission active : opération verrouillée."}`);
+                if (typeof logTerminal === "function" && msg.message) {
+                    logTerminal("MISSION", `🔒 ${msg.message}`);
+                }
+            } else if (msg.type === "hardware_status" && msg.hardware) {
                 applyHardwareStatusUI(msg.hardware);
             } else if (msg.type === "camera_status" && msg.camera) {
                 applyCameraStatusUI(msg.camera);
@@ -6937,12 +7009,210 @@
                 } else {
                     setMissionUIState("IDLE");
                 }
+            } else if (msg.type === "mission_paused" || msg.type === "mission_resumed") {
+                if (msg.mission_snapshot) {
+                    applyServerMissionSnapshot(msg.mission_snapshot, msg);
+                } else {
+                    setMissionUIState(msg.paused ? "PAUSED" : "RUNNING");
+                }
             } else if (msg.type === "mission_aborted") {
                 logTerminal("MISSION", "Mission interrompue (STOP)");
                 updateStatus(isArmed ? 1 : 0, msg.mode || "MANUAL", null);
                 setMissionUIState("IDLE");
+                const liveBanner = document.getElementById("liveMissionWorkBanner");
+                if (liveBanner) liveBanner.style.display = "none";
             }
         }
+
+        window._seenServerLogKeys = new Set();
+        window._serverActiveMissionSnapshot = null;
+        window._liveElapsedSeconds = 0;
+        window._liveMissionIsPaused = false;
+        window._bootHydrationReady = false;
+
+        function formatElapsedMMSS(totalSec) {
+            const sec = Math.max(0, Math.floor(Number(totalSec) || 0));
+            const m = Math.floor(sec / 60);
+            const s = sec % 60;
+            return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+        }
+
+        function replayServerRecentLogs(recentLogs) {
+            if (!Array.isArray(recentLogs) || recentLogs.length === 0) return;
+            recentLogs.forEach((entry) => {
+                if (!entry || !entry.line || isConsoleNoiseLine(entry.line)) return;
+                const key = `${entry.ts || 0}|${entry.direction || "RX"}|${entry.line}`;
+                if (window._seenServerLogKeys.has(key)) return;
+                window._seenServerLogKeys.add(key);
+                if (window._seenServerLogKeys.size > 300) {
+                    const first = window._seenServerLogKeys.values().next().value;
+                    window._seenServerLogKeys.delete(first);
+                }
+                if (typeof logTerminal === "function") {
+                    logTerminal(entry.direction || "RX", entry.line);
+                }
+            });
+        }
+
+        function updateLiveWorkBanner(snap) {
+            const banner = document.getElementById("liveMissionWorkBanner");
+            if (!banner) return;
+            const isActiveOrPaused = Boolean(snap && (snap.mission_active || snap.mission_paused));
+            if (!isActiveOrPaused) {
+                banner.style.display = "none";
+                banner.classList.remove("paused");
+                window._liveMissionIsPaused = false;
+                return;
+            }
+            const isPaused = Boolean(snap.mission_paused || snap.mission_status === "PAUSED");
+            window._liveMissionIsPaused = isPaused;
+            window._liveElapsedSeconds = Number(snap.elapsed_s || 0);
+
+            banner.style.display = "flex";
+            banner.classList.toggle("paused", isPaused || snap.mission_status === "WAITING_MOVING_OBSTACLE");
+
+            const txtEl = document.getElementById("liveMissionBannerText");
+            const prefix = isPaused ? "⏸ ROBOT EN PAUSE" : "🤖 ROBOT EN COURS DE TRAVAIL";
+            const mLabel = snap.mission_label || "Mission Active";
+            const actionTxt = snap.current_action || snap.phase_label || "Exécution autonome...";
+            if (txtEl) {
+                txtEl.innerText = `${prefix} — ${mLabel} | ${actionTxt}`;
+            }
+
+            const elEl = document.getElementById("liveMissionElapsed");
+            if (elEl) elEl.innerText = `⏱ ${formatElapsedMMSS(window._liveElapsedSeconds)}`;
+
+            const rowEl = document.getElementById("liveMissionRowBadge");
+            if (rowEl) rowEl.innerText = `🛤️ Rang ${snap.row_index || 1}/${snap.total_rows_est || 1}`;
+
+            const distEl = document.getElementById("liveMissionDistBadge");
+            if (distEl) distEl.innerText = `📏 ${Number(snap.distance_m || 0).toFixed(1)} m`;
+
+            const pauseBtn = document.getElementById("btnLiveBannerPauseResume");
+            if (pauseBtn) {
+                pauseBtn.innerText = isPaused ? "▶ Reprendre" : "⏸ Pause";
+                pauseBtn.style.background = isPaused ? "#10b981" : "#f59e0b";
+                pauseBtn.style.color = isPaused ? "#02200c" : "#111827";
+            }
+        }
+
+        function togglePauseResumeMission() {
+            const isPaused = Boolean(window._liveMissionIsPaused);
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: isPaused ? "resume_mission" : "pause_mission" }));
+            } else {
+                fetch(isPaused ? "/api/resume" : "/api/pause", { method: "POST" }).catch(() => {});
+            }
+        }
+        window.togglePauseResumeMission = togglePauseResumeMission;
+
+        function applyServerMissionSnapshot(snap, fullPayload = null) {
+            if (!snap || typeof snap !== "object") return;
+            window._serverActiveMissionSnapshot = snap;
+
+            // 1. Rejouer l'historique récent dans la console (30 dernières lignes dédupliquées)
+            if (Array.isArray(snap.recent_logs)) {
+                replayServerRecentLogs(snap.recent_logs);
+            }
+
+            // 2. Synchroniser l'état réel matériel / caméra même si aucune mission ne tourne (anti-reset F5)
+            if (fullPayload && fullPayload.hardware) {
+                applyHardwareStatusUI(fullPayload.hardware);
+            } else if (typeof snap.hardware_connected === "boolean") {
+                hardwareConnected = snap.hardware_connected;
+                if (window.wizardNav && typeof window.wizardNav.setHardwareStatus === "function") {
+                    window.wizardNav.setHardwareStatus(snap.hardware_connected);
+                }
+            }
+            if (fullPayload && fullPayload.camera) {
+                applyCameraStatusUI(fullPayload.camera);
+            }
+            if (typeof snap.camera_pitch_deg === "number") {
+                const tiltSlider = document.getElementById("camSliderTilt");
+                const tiltDisp = document.getElementById("camTiltValDisplay");
+                const dynPitch = document.getElementById("dyn_camera_pitch_deg");
+                if (tiltSlider && document.activeElement !== tiltSlider) tiltSlider.value = snap.camera_pitch_deg.toFixed(1);
+                if (tiltDisp) tiltDisp.innerText = `${snap.camera_pitch_deg.toFixed(1)}°`;
+                if (dynPitch && document.activeElement !== dynPitch) dynPitch.value = snap.camera_pitch_deg.toFixed(1);
+            }
+            if (typeof snap.auto_pitch === "boolean") {
+                const camAuto = document.getElementById("camChkAutoPitch");
+                const dynAuto = document.getElementById("dyn_auto_pitch");
+                if (camAuto) camAuto.checked = snap.auto_pitch;
+                if (dynAuto) dynAuto.checked = snap.auto_pitch;
+            }
+
+            // 3. Synchroniser les dimensions parcelle & le sens
+            if (typeof snap.parcel_length_m === "number") {
+                ["inputFieldLengthM", "inputFieldLengthM_seed", "inputFieldLengthM_reseed"].forEach((id) => {
+                    const el = document.getElementById(id);
+                    if (el && document.activeElement !== el) el.value = snap.parcel_length_m;
+                });
+            }
+            if (typeof snap.parcel_width_m === "number") {
+                ["inputFieldWidthM", "inputFieldWidthM_seed", "inputFieldWidthM_reseed"].forEach((id) => {
+                    const el = document.getElementById(id);
+                    if (el && document.activeElement !== el) el.value = snap.parcel_width_m;
+                });
+            }
+
+            // 4. Si une mission est active ou en pause -> saut immédiat vers l'Étape 4 (Cockpit) + bandeau + Mission Lock
+            const isActiveOrPaused = Boolean(snap.mission_active || snap.mission_paused);
+            if (isActiveOrPaused) {
+                const mType = snap.mission_type || "weeding";
+                if (window.wizardNav && typeof window.wizardNav.attachToActiveMission === "function") {
+                    if (window.wizardNav.currentStep !== 4 || window.wizardNav.selectedMission !== mType) {
+                        window.wizardNav.attachToActiveMission(mType);
+                    }
+                }
+                setMissionUIState(snap.mission_paused ? "PAUSED" : "RUNNING");
+                updateLiveWorkBanner(snap);
+
+                // S'assurer que le flux MJPEG caméra est bien branché sur le cockpit réel
+                const realFeed = document.getElementById("realVideoFeed");
+                if (realFeed && (!realFeed.src || !realFeed.src.includes("/api/camera/stream"))) {
+                    realFeed.src = "/api/camera/stream";
+                }
+            } else {
+                updateLiveWorkBanner(snap);
+                if (window.isMissionRunning || currentMissionUIState === "RUNNING" || currentMissionUIState === "PAUSED") {
+                    setMissionUIState("IDLE");
+                }
+            }
+        }
+        window.applyServerMissionSnapshot = applyServerMissionSnapshot;
+
+        async function bootstrapFromServerState(source = "boot") {
+            try {
+                const res = await fetch("/api/status", { cache: "no-store" });
+                if (!res.ok) return null;
+                const data = await res.json();
+                if (typeof data.armed === "number") {
+                    updateStatus(data.armed, data.mode || "MANUAL", data.mission || null);
+                }
+                if (data.mission_snapshot) {
+                    applyServerMissionSnapshot(data.mission_snapshot, data);
+                } else {
+                    if (data.hardware) applyHardwareStatusUI(data.hardware);
+                    if (data.camera) applyCameraStatusUI(data.camera);
+                }
+                return data;
+            } catch (e) {
+                console.warn(`bootstrapFromServerState(${source}):`, e);
+                return null;
+            }
+        }
+        window.bootstrapFromServerState = bootstrapFromServerState;
+
+        // Tick local 1 s pour le compteur temps écoulé du bandeau actif
+        setInterval(() => {
+            const snap = window._serverActiveMissionSnapshot;
+            if (snap && snap.mission_active && !snap.mission_paused) {
+                window._liveElapsedSeconds = (Number(window._liveElapsedSeconds) || 0) + 1;
+                const elEl = document.getElementById("liveMissionElapsed");
+                if (elEl) elEl.innerText = `⏱ ${formatElapsedMMSS(window._liveElapsedSeconds)}`;
+            }
+        }, 1000);
 
         window._lastMissionAlertTs = 0;
         function showMissionStatusAlert(level, message) {
@@ -7450,13 +7720,7 @@
         }
         window.onMainMenuBtnClick = onMainMenuBtnClick;
 
-        window.addEventListener("beforeunload", (e) => {
-            if (window.isMissionRunning || currentMissionUIState === 'RUNNING') {
-                e.preventDefault();
-                e.returnValue = "🔒 Une mission agricole est en cours. Interrompez la mission avant de quitter.";
-                return e.returnValue;
-            }
-        });
+        // Zéro commande destructive au déchargement/actualisation : F5 laisse la mission tourner sur le serveur et se réattache au rechargement.
 
         function setFieldBoundaryMode(mode) {
             if (window.isMissionRunning) {
@@ -7481,7 +7745,7 @@
 
         function setMissionUIState(state) {
             currentMissionUIState = state;
-            const isRunning = (state === 'RUNNING');
+            const isRunning = (state === 'RUNNING' || state === 'PAUSED');
             window.isMissionRunning = isRunning;
 
             document.querySelectorAll('.mission-prep-view').forEach(el => {
@@ -7491,8 +7755,18 @@
                 el.style.display = isRunning ? 'flex' : 'none';
             });
 
-            // Verrouillage visuel des boutons de navigation et de changement de mode pendant la mission
-            const lockIds = ["hdrBtnMainMenu", "btnRealCockpitMainMenu", "btnModeSimOnly", "btnModeCoupled", "btnModeRealZero", "btnOpenDynamicSpecs"];
+            // Verrouillage visuel des boutons de navigation, réglages et changement de mode pendant la mission (RUNNING ou PAUSED)
+            const lockIds = [
+                "hdrBtnMainMenu",
+                "btnRealCockpitMainMenu",
+                "btnModeSimOnly",
+                "btnModeCoupled",
+                "btnModeRealZero",
+                "btnOpenDynamicSpecs",
+                "btnCameraModal",
+                "btnHwModal",
+                "btnSettingsDropdown"
+            ];
             lockIds.forEach(id => {
                 const btn = document.getElementById(id);
                 if (!btn) return;
@@ -7501,12 +7775,14 @@
                 if (id === "hdrBtnMainMenu") {
                     btn.innerText = isRunning ? "🔒 Menu Verrouillé" : "⬅ Menu Principal";
                 } else if (id === "btnRealCockpitMainMenu") {
-                    btn.innerText = isRunning ? "🔒 Mission en cours" : "← Retour au Menu Principal";
+                    btn.innerText = isRunning ? (state === 'PAUSED' ? "🔒 Mission en pause" : "🔒 Mission en cours") : "← Retour au Menu Principal";
                 }
             });
             if (!isRunning) {
                 const banner = document.getElementById("missionLockAlertBanner");
                 if (banner) banner.style.display = "none";
+                const workBanner = document.getElementById("liveMissionWorkBanner");
+                if (workBanner) workBanner.style.display = "none";
             }
         }
         window.setMissionUIState = setMissionUIState;
@@ -8802,7 +9078,15 @@
             });
 
             buildNvsMotorsTable();
+            // 1. Hydratation prioritaire depuis GET /api/status AVANT toute initialisation du Wizard
+            //    (garantit zéro flash de l'Étape 1 lors d'un F5 ou d'un nouvel appareil pendant une mission active/en pause)
+            await bootstrapFromServerState("boot");
             const sysInfo = await fetchSystemInfoAndVersion();
+            window._bootHydrationReady = true;
+            if (window.wizardNav && !window.wizardNav._bootInitialized) {
+                window.wizardNav._bootInitialized = true;
+                window.wizardNav.init();
+            }
             if (!sysInfo || !sysInfo.is_robot_uc) {
                 initThreeScene();
             }
@@ -8894,7 +9178,11 @@
         });
 
         window.addEventListener("DOMContentLoaded", () => {
-            window.wizardNav.init();
+            // Attendre bootstrapFromServerState() avant d'ouvrir l'Étape 1 afin d'éviter tout flash si une mission est active
+            if (window._bootHydrationReady && window.wizardNav && !window.wizardNav._bootInitialized) {
+                window.wizardNav._bootInitialized = true;
+                window.wizardNav.init();
+            }
         });
     </script>
 </body>

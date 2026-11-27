@@ -31,11 +31,42 @@
     </div>
 
     <div class="content">
+        <!-- VUE MISSION ACTIVE EN DIRECT (OUVERTE AUTOMATIQUEMENT SI MISSION EN COURS OU EN PAUSE) -->
+        <div id="mobActiveMissionCard" class="card" style="display:none; border:2px solid #10b981; background:linear-gradient(160deg, rgba(6,78,59,0.55), rgba(15,23,42,0.95));">
+            <div class="card-title" style="margin-bottom:8px;">
+                <span id="mobLiveMissionStatusBadge" style="color:#34d399; font-weight:900;">🟢 ROBOT EN COURS DE TRAVAIL</span>
+                <span id="mobLiveElapsed" style="font-family:monospace; color:#f8fafc;">⏱ 00:00</span>
+            </div>
+            <div id="mobLiveMissionLabel" style="font-size:14px; font-weight:900; color:#f8fafc; margin-bottom:4px;">🌿 3. Désherbage IA</div>
+            <div id="mobLiveMissionAction" style="font-size:12px; color:#a7f3d0; margin-bottom:8px;">Suivi du rang en cours...</div>
+            <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:6px; margin-bottom:10px; text-align:center;">
+                <div style="background:#0b1324; border:1px solid #1e293b; border-radius:6px; padding:5px;">
+                    <div style="font-size:9.5px; color:var(--text-dim);">🛤️ Rang</div>
+                    <div id="mobLiveRow" style="font-size:12.5px; font-weight:800; color:#38bdf8;">1/10</div>
+                </div>
+                <div style="background:#0b1324; border:1px solid #1e293b; border-radius:6px; padding:5px;">
+                    <div style="font-size:9.5px; color:var(--text-dim);">📏 Distance</div>
+                    <div id="mobLiveDist" style="font-size:12.5px; font-weight:800; color:#34d399;">0.0 m</div>
+                </div>
+                <div style="background:#0b1324; border:1px solid #1e293b; border-radius:6px; padding:5px;">
+                    <div style="font-size:9.5px; color:var(--text-dim);">📐 Caméra</div>
+                    <div id="mobLivePitch" style="font-size:12.5px; font-weight:800; color:#facc15;">32.0°</div>
+                </div>
+            </div>
+            <div style="width:100%; aspect-ratio:16/9; background:#000; border-radius:8px; overflow:hidden; border:1px solid #1e293b; margin-bottom:10px;">
+                <img id="mobLiveCameraStream" src="/api/camera/stream" style="width:100%; height:100%; object-fit:contain; display:block;" alt="Flux vidéo robot en cours de travail" />
+            </div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+                <button id="mobBtnPauseResume" class="tab-btn" style="background:#f59e0b; color:#111827; font-weight:900;">⏸ Pause</button>
+                <button id="mobBtnAbortMission" class="tab-btn" style="background:#dc2626; color:#fff; font-weight:900;">🛑 Arrêter (STOP)</button>
+            </div>
+        </div>
+
         <div id="mobCoupledLockBanner" class="card" style="display:none; background:#7f1d1d; border-color:#dc2626; color:#fee2e2; text-align:center; font-weight:800; font-size:12px;">
             ⏳ EN ATTENTE DE CONNEXION AU ROBOT PHYSIQUE (ESP32-S3)...
         </div>
 
-        <div class="card">
+        <div id="mobConnectionCard" class="card">
             <div class="card-title">
                 <span>🔌 Mode & Liaison Robot</span>
                 <span id="wsInfoText" style="font-size:10px; color:var(--text-dim);">Connexion...</span>

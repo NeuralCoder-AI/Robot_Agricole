@@ -14,7 +14,13 @@ export function initMobileMissions() {
     const viewSeed = document.getElementById("viewSeeding");
     const viewReseed = document.getElementById("viewReseeding");
 
+    const isLockedByActiveMission = () => {
+        const st = stateStore.getState();
+        return Boolean(st.missionActive || st.missionPaused);
+    };
+
     const switchTab = (activeTab, activeView) => {
+        if (isLockedByActiveMission()) return;
         [tabWeed, tabSeed, tabReseed].forEach(t => {
             if (t) {
                 t.classList.remove("active-weed");
@@ -72,14 +78,21 @@ export function initMobileMissions() {
     const btnConnectHw = document.getElementById("mobBtnConnectHw");
 
     if (bSim) {
-        bSim.addEventListener("click", () => wsClient.setExecutionMode("SIMULATION_ONLY"));
+        bSim.addEventListener("click", () => {
+            if (isLockedByActiveMission()) return;
+            wsClient.setExecutionMode("SIMULATION_ONLY");
+        });
     }
     if (bCoup) {
-        bCoup.addEventListener("click", () => wsClient.setExecutionMode("COUPLED"));
+        bCoup.addEventListener("click", () => {
+            if (isLockedByActiveMission()) return;
+            wsClient.setExecutionMode("COUPLED");
+        });
     }
 
     if (btnConnectHw) {
         btnConnectHw.addEventListener("click", () => {
+            if (isLockedByActiveMission()) return;
             const tr = document.getElementById("mobHwTransport")?.value || "WIFI_HTTP";
             const target = document.getElementById("mobHwTarget")?.value.trim() || "192.168.4.1";
             wsClient.connectHardware({

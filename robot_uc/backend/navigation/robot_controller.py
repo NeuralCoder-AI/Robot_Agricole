@@ -6,6 +6,7 @@ le gestionnaire de mode (MANUEL / AUTOMATIQUE), le suivi de progression des miss
 (avec pause/reprise) et la synchronisation des métriques agronomiques 3D.
 """
 
+from collections import deque
 import enum
 import json
 import logging
@@ -148,6 +149,13 @@ class RobotController:
         self.mission_paused: bool = False
         self.last_mission_alert: Optional[Dict[str, Any]] = None
         self._last_corridor_ended_by_vision: bool = False
+        self._recent_logs: deque[Dict[str, Any]] = deque(maxlen=30)
+        self._mission_started_ts: Optional[float] = None
+        self._mission_ended_ts: Optional[float] = None
+        self._last_mission_status: str = "IDLE"
+        self._last_mission_type: str = "manual"
+        self.direction_mode: str = "AUTO"
+        self.locked_side: Optional[str] = None
         self.done_history: List[Dict[str, Any]] = []
         self._mission_thread: Optional[threading.Thread] = None
         self._mission_stop_flag = threading.Event()
@@ -317,14 +325,59 @@ class RobotController:
             self.device = serial.Serial(self.port, self.baudrate, timeout=0.1)
 
     def _emit_log(self, direction: str, message: str) -> None:
-        """Émet un log console en filtrant à 100 % PING, PONG et #T."""
+        """Émet un log console en filtrant à 100 % PING, PONG et #T, et l'archive dans le buffer circulaire (30 lignes)."""
         if is_console_noise_line(message):
             return
+        self._recent_logs.append(
+            {
+                "direction": str(direction or "RX"),
+                "line": str(message),
+                "ts": int(time.time() * 1000),
+            }
+        )
         for cb in self.log_callbacks:
             try:
                 cb(direction, message)
             except Exception:
                 pass
+
+    def get_recent_logs(self, limit: int = 30) -> List[Dict[str, Any]]:
+        """Retourne les `limit` dernières lignes de journalisation console (sans PING/PONG/#T)."""
+        lim = max(1, min(30, int(limit)))
+        return list(self._recent_logs)[-lim:]
+
+    @staticmethod
+    def _normalize_mission_type(mission_name: Optional[str]) -> str:
+        if not mission_name:
+            return "manual"
+        m = str(mission_name).strip().lower()
+        if "reseed" in m:
+            return "reseeding"
+        if "seed" in m:
+            return "seeding"
+        if "weed" in m:
+            return "weeding"
+        if "manual" in m:
+            return "manual"
+        return m
+
+    @staticmethod
+    def _mission_label_for(mission_type: str) -> str:
+        labels = {
+            "seeding": "1. Semence Initiale",
+            "reseeding": "2. Révision Semence",
+            "weeding": "3. Désherbage IA",
+            "manual": "4. Conduite Manuelle",
+            "multi_row": "Parcours Multi-Rangs",
+            "obstacle_avoidance": "Contournement Obstacles",
+            "solar_deploy": "Déploiement Solaire M7",
+            "solar_retract": "Rangement Solaire M7",
+        }
+        return labels.get(mission_type, f"Mission {mission_type}")
+
+    def is_mission_locked(self) -> bool:
+        """True tant qu'une mission est active ou en pause (verrouillage configuration/changement de mission)."""
+        return bool(self.mission_running or self.mission_paused)
 
     def _on_hardware_bridge_log(self, direction: str, message: str) -> None:
         """Relaye les vrais échanges TX/RX du robot physique ESP32-S3 (sans PING/PONG/#T)."""
@@ -967,8 +1020,43 @@ class RobotController:
 
     def get_mission_state(self) -> Dict[str, Any]:
         """Retourne l'état détaillé de la mission autonome en cours."""
+        mission_active = bool(self.mission_running)
+        mission_paused = bool(self.mission_paused)
+        m_type = (
+            self._normalize_mission_type(self.current_mission_name)
+            if (mission_active or mission_paused)
+            else self._last_mission_type
+        )
+        if mission_paused:
+            m_status = "PAUSED"
+        elif mission_active:
+            if self.obstacle_state == "WAITING_MOVING_OBSTACLE":
+                m_status = "WAITING_MOVING_OBSTACLE"
+            elif self.bypass_plan_locked or self.obstacle_state in ("BYPASS_REQUIRED", "BYPASSING"):
+                m_status = "BYPASSING"
+            else:
+                m_status = "RUNNING"
+        else:
+            m_status = self._last_mission_status
+
+        if self._mission_started_ts is not None and (mission_active or mission_paused):
+            elapsed_s = round(max(0.0, time.time() - self._mission_started_ts), 1)
+        elif self._mission_started_ts is not None and self._mission_ended_ts is not None:
+            elapsed_s = round(max(0.0, self._mission_ended_ts - self._mission_started_ts), 1)
+        else:
+            elapsed_s = 0.0
+
         return {
             "name": self.current_mission_name,
+            "mission_active": mission_active,
+            "mission_paused": mission_paused,
+            "mission_status": m_status,
+            "mission_type": m_type,
+            "mission_label": self._mission_label_for(m_type),
+            "current_action": self.mission_step_label,
+            "phase_label": self.mission_step_label,
+            "elapsed_s": elapsed_s,
+            "distance_m": round(float(self.distance_traveled_m), 2),
             "progress": self.mission_progress,
             "step_label": self.mission_step_label,
             "paused": self.mission_paused,
@@ -979,6 +1067,8 @@ class RobotController:
             "state": self.state,
             "weeding_state": self.weeding_state,
             "progression_direction": self.progression_direction,
+            "direction_mode": self.direction_mode,
+            "locked_side": self.locked_side,
             "reseeded_seeds_count": self.reseeded_seeds_count,
             "dead_plants_count": self.dead_plants_count,
             "gaps_detected_count": self.gaps_detected_count,
@@ -995,6 +1085,66 @@ class RobotController:
             "current_corridor": self.current_corridor,
             "last_mission_alert": self.last_mission_alert,
             "done_history": self.done_history[-20:],
+        }
+
+    def get_mission_snapshot(self) -> Dict[str, Any]:
+        """Snapshot complet de synchronisation multi-appareils & reprise après actualisation (F5)."""
+        ms = self.get_mission_state()
+        cam_connected = False
+        cam_synth = False
+        cam_dev = "/dev/video0"
+        cam_pitch = float(robot_config.camera_pitch_deg)
+        cam_height = float(robot_config.camera_height_m)
+        cam_auto_pitch = bool(robot_config.auto_pitch)
+        try:
+            from backend.vision.camera_manager import camera_manager as _cm
+            cam_connected = bool(_cm.connected)
+            cam_synth = bool(_cm.is_synthetic)
+            cam_dev = str(_cm.device_path or f"/dev/video{_cm.device_index}")
+            cam_pitch = float(_cm.camera_tilt_deg)
+            cam_height = float(_cm.camera_height_m)
+            cam_auto_pitch = bool(_cm.auto_pitch)
+        except Exception:
+            pass
+
+        hw_port = (
+            self.hardware_bridge.serial_port
+            if self.hardware_bridge.transport == ConnectionTransport.USB_UART.value
+            else f"{self.hardware_bridge.host}:{self.hardware_bridge.port}"
+        )
+
+        return {
+            "mission_active": ms["mission_active"],
+            "mission_paused": ms["mission_paused"],
+            "mission_status": ms["mission_status"],
+            "mission_type": ms["mission_type"],
+            "mission_name": ms["name"],
+            "mission_label": ms["mission_label"],
+            "current_action": ms["current_action"],
+            "phase_label": ms["phase_label"],
+            "progress": ms["progress"],
+            "row_index": int(self.current_corridor),
+            "total_rows_est": int(self.corridors_total),
+            "distance_m": ms["distance_m"],
+            "elapsed_s": ms["elapsed_s"],
+            "parcel_length_m": round(float(self.field_length_m), 2),
+            "parcel_width_m": round(float(self.field_width_m), 2),
+            "boundary_mode": getattr(self.kinematic_engine, "boundary_mode", "FIXED_DIMENSIONS"),
+            "progression_direction": int(self.progression_direction),
+            "direction_mode": self.direction_mode,
+            "locked_side": self.locked_side,
+            "hardware_connected": bool(self.hardware_bridge.connected),
+            "hardware_port": hw_port,
+            "hardware_transport": self.hardware_bridge.transport,
+            "armed": int(self.armed),
+            "camera_connected": cam_connected,
+            "camera_is_synthetic": cam_synth,
+            "camera_device": cam_dev,
+            "camera_pitch_deg": round(cam_pitch, 1),
+            "camera_height_m": round(cam_height, 2),
+            "auto_pitch": cam_auto_pitch,
+            "last_mission_alert": self.last_mission_alert,
+            "recent_logs": self.get_recent_logs(30),
         }
 
     # --------------------------------------------------------------------------
@@ -2785,6 +2935,7 @@ class RobotController:
         if not self.current_mission_name or self.mission_paused:
             return False
         self.mission_paused = True
+        self._last_mission_status = "PAUSED"
         self._mission_pause_event.clear()
         self.stop()
         self._notify_mission_progress(self.mission_progress, f"⏸ PAUSE : {self.mission_step_label}")
@@ -2795,6 +2946,7 @@ class RobotController:
         if not self.current_mission_name or not self.mission_paused:
             return False
         self.mission_paused = False
+        self._last_mission_status = "RUNNING"
         clean_label = self.mission_step_label.replace("⏸ PAUSE : ", "")
         self.mission_step_label = clean_label
         self._mission_pause_event.set()
@@ -2825,6 +2977,8 @@ class RobotController:
         self._mission_pause_event.set()
         self.mission_paused = False
         self.mission_running = False
+        self._last_mission_status = "STOPPED"
+        self._mission_ended_ts = time.time()
         self._mission_stop_flag.set()
         for ev in self.done_events.values():
             ev.set()  # Débloque les attentes
@@ -2869,7 +3023,7 @@ class RobotController:
             )
             return False
 
-        if self._mission_thread and self._mission_thread.is_alive():
+        if self.is_mission_locked() or (self._mission_thread and self._mission_thread.is_alive()):
             logger.warning("Une mission est déjà en cours d'exécution : %s", self.current_mission_name)
             return False
 
@@ -2884,6 +3038,11 @@ class RobotController:
 
         if "progression_direction" in kwargs and kwargs["progression_direction"] is not None:
             self.progression_direction = -1 if int(kwargs["progression_direction"]) < 0 else 1
+        if "direction_mode" in kwargs and kwargs["direction_mode"]:
+            self.direction_mode = str(kwargs["direction_mode"]).upper()
+        else:
+            self.direction_mode = "RIGHT" if self.progression_direction < 0 else "LEFT"
+        self.locked_side = "RIGHT" if self.progression_direction < 0 else "LEFT"
         if "start_x" in kwargs and kwargs["start_x"] is not None:
             self.robot_x = float(kwargs["start_x"])
         if "start_z" in kwargs and kwargs["start_z"] is not None:
@@ -2907,6 +3066,11 @@ class RobotController:
 
         self.mode = RobotMode.AUTO
         self.current_mission_name = mission_name
+        self._last_mission_type = self._normalize_mission_type(mission_name)
+        self._mission_started_ts = time.time()
+        self._mission_ended_ts = None
+        self._last_mission_status = "RUNNING"
+        self.mission_running = True
         self.last_mission_alert = None
         vision_mode_map = {
             "seeding": "SEEDING",
@@ -2943,14 +3107,26 @@ class RobotController:
 
         def runner():
             self.mission_running = True
+            ok = False
             try:
                 ok = target_map[mission_name]()
                 if ok and not self._mission_stop_flag.is_set() and self.last_mission_alert is None:
+                    self._last_mission_status = "COMPLETED"
                     self._notify_mission_progress(100, f"Mission {mission_name} terminée avec succès")
             except Exception as e:
+                self._last_mission_status = "STOPPED"
                 logger.error("Erreur durant la mission %s : %s", mission_name, e)
             finally:
                 self.mission_running = False
+                self._mission_ended_ts = time.time()
+                if self._mission_stop_flag.is_set() or self.estop_active:
+                    self._last_mission_status = "STOPPED"
+                elif self.last_mission_alert is not None and self.last_mission_alert.get("level") == "error":
+                    self._last_mission_status = "STOPPED"
+                elif ok or (self.last_mission_alert is not None and self.last_mission_alert.get("level") == "success"):
+                    self._last_mission_status = "COMPLETED"
+                else:
+                    self._last_mission_status = "STOPPED"
                 self.current_mission_name = None
                 self.mission_paused = False
                 self._mission_pause_event.set()

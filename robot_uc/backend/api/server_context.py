@@ -22,23 +22,33 @@ BASE_DIR: Path = Path(__file__).resolve().parent.parent.parent
 robot: RobotController = RobotController(use_simulator=True)
 
 def build_state_payload(msg_type: str = "state") -> Dict[str, Any]:
-    """Construit le paquet d'état complet synchronisé en réévaluant l'IP en direct."""
+    """Construit le paquet d'état complet synchronisé (avec mission_snapshot & caméra) en réévaluant l'IP en direct."""
     live_ip = detect_local_wifi_ip()
     all_ips = detect_all_local_ips()
+    cam_status: Dict[str, Any] = {}
+    try:
+        from backend.vision.camera_manager import camera_manager
+        cam_status = camera_manager.get_status()
+    except Exception:
+        cam_status = {}
     return {
         "type": msg_type,
         "armed": robot.armed if robot else 0,
         "is_armed": robot.is_armed if robot else False,
         "estop": robot.estop_active if robot else True,
         "mission_running": robot.mission_running if robot else False,
+        "mission_active": bool(robot and robot.mission_running),
+        "mission_paused": bool(robot and robot.mission_paused),
         "state": robot.state if robot else "ESTOP",
         "mode": robot.mode.value if robot else "MANUAL",
         "mission": robot.current_mission_name if robot else None,
         "mission_state": robot.get_mission_state() if robot else {},
+        "mission_snapshot": robot.get_mission_snapshot() if robot else {},
         "telemetry": robot.last_telemetry if robot else {},
         "agronomics": robot.get_agronomic_metrics() if robot else {},
         "robot_specs": robot.get_robot_specs() if robot else {},
         "hardware": robot.get_hardware_status() if robot else {},
+        "camera": cam_status,
         "local_ip": live_ip,
         "all_ips": all_ips,
         "expo_url": f"exp://{live_ip}:{EXPO_PORT}",
@@ -117,7 +127,11 @@ async def lifespan(app: FastAPI):
                 "armed": robot.armed,
                 "mode": robot.mode.value,
                 "mission": robot.current_mission_name,
+                "mission_running": robot.mission_running,
+                "mission_active": robot.mission_running,
+                "mission_paused": robot.mission_paused,
                 "mission_state": robot.get_mission_state(),
+                "mission_snapshot": robot.get_mission_snapshot(),
                 "agronomics": robot.get_agronomic_metrics(),
                 "hardware": robot.get_hardware_status(),
             }

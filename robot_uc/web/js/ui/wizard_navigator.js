@@ -24,6 +24,11 @@ export class WizardNavigator {
     init() {
         this.createWizardDOM();
         this.bindGlobalEvents();
+        const snap = window._serverActiveMissionSnapshot;
+        if (snap && (snap.mission_active || snap.mission_paused)) {
+            this.attachToActiveMission(snap.mission_type || 'weeding');
+            return;
+        }
         if (window.isRobotUCMode || this.robotUCMode) {
             this.enableRobotUCEmbeddedMode();
         } else {
@@ -36,9 +41,35 @@ export class WizardNavigator {
         this.robotUCMode = true;
         this.executionMode = 'REAL_ZERO_SIM';
         this.createWizardDOM();
+        const snap = window._serverActiveMissionSnapshot;
+        if (snap && (snap.mission_active || snap.mission_paused)) {
+            // Persistance de mission active/en pause : saut direct vers le Cockpit (Étape 4) sans jamais afficher l'Étape 1
+            this.attachToActiveMission(snap.mission_type || 'weeding');
+            return;
+        }
         // En mode ROBOT_UC : parcours guidé 4 étapes dès le démarrage :
         // Étape 1 (Connexion ESP32 + Calibration Moteurs) -> Étape 2 (Réglage Angle Caméra) -> Étape 3 (Menu Missions) -> Étape 4 (Cockpit)
         this.goToStep(1);
+    }
+
+    attachToActiveMission(missionType) {
+        this.createWizardDOM();
+        const normalized = ['seeding', 'reseeding', 'weeding', 'manual'].includes(missionType)
+            ? missionType
+            : 'weeding';
+        this.selectedMission = normalized;
+        this.currentStep = 4;
+        if (this.overlayEl) {
+            this.overlayEl.style.display = 'none';
+        }
+        window.currentActiveMission = normalized;
+        this.applyCleanWorkspaceLayout(normalized, { preserveActiveState: true });
+        requestAnimationFrame(() => {
+            window.dispatchEvent(new Event('resize'));
+            if (typeof window.onWindowResize === 'function') {
+                window.onWindowResize();
+            }
+        });
     }
 
     createWizardDOM() {
@@ -947,7 +978,7 @@ export class WizardNavigator {
         }, 60);
     }
 
-    applyCleanWorkspaceLayout(missionName) {
+    applyCleanWorkspaceLayout(missionName, options = {}) {
         // 1. Mise à jour du titre de la vue active dans le Header & badge lecture seule du cockpit vidéo
         const titles = {
             'seeding': '🌱 1. Semence Initiale',
@@ -983,8 +1014,8 @@ export class WizardNavigator {
             el.style.display = isManual ? 'none' : '';
         });
 
-        // 3. Réinitialiser la vue en ÉTAT A (Préparation) pour la mission active
-        if (typeof window.setMissionUIState === 'function') {
+        // 3. Réinitialiser la vue en ÉTAT A (Préparation) uniquement si on n'est PAS en train de rejoindre une mission active
+        if (!options.preserveActiveState && typeof window.setMissionUIState === 'function') {
             window.setMissionUIState('IDLE');
         }
     }
